@@ -1,21 +1,34 @@
+import "dotenv/config";
 import { Spectrum } from "spectrum-ts";
-import { imessage } from "@spectrum-ts/imessage";
-// Spectrum bridges a single agent loop to many messaging interfaces.
-// Each provider in `providers` adds an interface (terminal TUI, iMessage, …).
-// Docs: https://photon.codes/docs/spectrum-ts
+import { imessage } from "spectrum-ts/providers/imessage";
+import { terminal } from "spectrum-ts/providers/terminal";
+import { handleMessage } from "./handlers/message.ts";
+
+const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
+
+for (const key of ["ANTHROPIC_API_KEY", "PROJECT_ID", "PROJECT_SECRET"]) {
+  if (!process.env[key] && !(PROVIDER === "terminal" && key !== "ANTHROPIC_API_KEY")) {
+    throw new Error(`Missing ${key} in .env`);
+  }
+}
+
 const app = await Spectrum({
   projectId: process.env.PROJECT_ID!,
   projectSecret: process.env.PROJECT_SECRET!,
-  providers: [
-    // imessage
-    imessage.config(),
-  ],
+  providers: [PROVIDER === "terminal" ? terminal.config() : imessage.config()],
 });
 
-// `app.messages` is an async iterable. Each tick yields a `space` (the
-// conversation) and an inbound `message`. Reply by awaiting `space.send(...)`.
+console.log(`Agent online. provider=${PROVIDER}`);
+
 for await (const [space, message] of app.messages) {
-  if (message.content.type === "text") {
-    await space.send(`echo: ${message.content.text}`);
+  try {
+    await space.responding(async () => {
+      await handleMessage(space, message);
+    });
+  } catch (err) {
+    console.error(
+      `[loop] error in space ${space.id}:`,
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
