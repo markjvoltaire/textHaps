@@ -11,6 +11,15 @@ From your project Settings on the [Photon dashboard](https://app.photon.codes):
 - `PROJECT_ID`
 - `PROJECT_SECRET`
 
+From [Anthropic](https://console.anthropic.com):
+
+- `ANTHROPIC_API_KEY`
+
+From the [Supabase project](https://supabase.com/dashboard/project/kvjdiwfqskywehwjinzs/settings/api):
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
 ## Run
 
 ```sh

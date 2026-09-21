@@ -1,5 +1,9 @@
-import type { Message, Space } from "spectrum-ts";
+import { attachment, group, type Message, type Space } from "spectrum-ts";
 import { generateReply } from "../agent/claude.ts";
+import { formatCatalogOverview, listCatalogEvents } from "../db/events.ts";
+import { listSaves } from "../db/saves.ts";
+import { upsertProfile } from "../db/profiles.ts";
+import { listTaste } from "../db/taste.ts";
 import { appendTurn, getHistory } from "../memory/history.ts";
 import { extractText, sanitizeOutgoingText } from "../utils/text.ts";
 
@@ -25,11 +29,19 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
   console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}`);
 
+  const platform = message.platform || "imessage";
+  const profile = await upsertProfile(platform, senderId);
+  const [taste, saves] = await Promise.all([listTaste(profile.id), listSaves(profile.id)]);
   const history = getHistory(senderId);
 
   let reply: string;
+  let imagePaths: string[] = [];
   try {
-    reply = sanitizeOutgoingText(await generateReply(history, text));
+    const generated = await generateReply({ profile, taste, saves, history, userMessage: text });
+    imagePaths = generated.imagePaths;
+    reply = imagePaths.length > 0
+      ? formatCatalogOverview(await listCatalogEvents())
+      : sanitizeOutgoingText(generated.text);
   } catch (err) {
     console.error(`[claude] failed for sender=${senderId}:`, err instanceof Error ? err.message : err);
     await space.send(FALLBACK_REPLY);
@@ -45,6 +57,15 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   appendTurn(senderId, { role: "user", content: text });
   appendTurn(senderId, { role: "assistant", content: reply });
 
-  console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)}`);
-  await space.send(reply);
+  console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)} images=${imagePaths.length}`);
+  const flyers = imagePaths.map((path) => attachment(path));
+  const first = flyers[0];
+  const second = flyers[1];
+  if (first && second) {
+    await space.send(group(first, second, ...flyers.slice(2)), reply);
+  } else if (first) {
+    await space.send(first, reply);
+  } else {
+    await space.send(reply);
+  }
 }

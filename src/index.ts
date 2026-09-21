@@ -6,8 +6,15 @@ import { handleMessage } from "./handlers/message.ts";
 
 const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
 
-for (const key of ["ANTHROPIC_API_KEY", "PROJECT_ID", "PROJECT_SECRET"]) {
-  if (!process.env[key] && !(PROVIDER === "terminal" && key !== "ANTHROPIC_API_KEY")) {
+for (const key of [
+  "ANTHROPIC_API_KEY",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "PROJECT_ID",
+  "PROJECT_SECRET",
+]) {
+  const skipPhoton = PROVIDER === "terminal" && (key === "PROJECT_ID" || key === "PROJECT_SECRET");
+  if (!process.env[key] && !skipPhoton) {
     throw new Error(`Missing ${key} in .env`);
   }
 }
