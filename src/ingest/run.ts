@@ -58,18 +58,15 @@ async function scrapeSource(source: Source, city: string): Promise<unknown[]> {
     return runActor("aitorsm/posh-events", {
       searchType: "city",
       city: poshCity(city),
-      when: "This Weekend",
+      when: "This Week",
       sort: "Trending",
       maxItems: MAX_ITEMS,
       enrichOrganizers: false,
     });
   }
-  return runActor("lexis-solutions/dice-fm", {
-    query: diceCity(city),
-    type: "city",
-    eventCategory: "party",
+  return runActor("aitorsm/dice-events", {
+    city: diceCity(city),
     maxItems: MAX_ITEMS,
-    proxyConfiguration: { useApifyProxy: true, apifyProxyGroups: [] },
   });
 }
 

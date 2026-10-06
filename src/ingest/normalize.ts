@@ -37,7 +37,7 @@ function normalizeItem(source: string, city: string, item: unknown): ListingDraf
     return {
       source,
       source_id: asText(row._id) ?? asText(row.id),
-      url: asText(row.url) ?? asText(row.link),
+      url: poshUrl(row),
       title,
       description: asText(row.shortDescription) ?? asText(row.description) ?? "",
       city: asText(row.city) ?? city,
@@ -54,16 +54,15 @@ function normalizeItem(source: string, city: string, item: unknown): ListingDraf
     if (!title) return null;
     return {
       source,
-      source_id: asText(row.url),
+      source_id: asText(row.eventId) ?? asText(row.url),
       url: asText(row.url),
       title,
-      description: asText(row.description) ?? "",
-      city: asText(row.city) ?? city,
-      venue: asText(row.place) ?? asText(row.location),
-      starts_at:
-        asText(row.doorsOpenDate) ?? unixToIso(row.date_unix) ?? parseDiceDatetime(asText(row.datetime)),
-      image_url: asText(row.image),
-      tags: asText(row.tags) ? [asText(row.tags)!] : [],
+      description: "",
+      city: asText(row.venueCity) ?? city,
+      venue: asText(row.venueName),
+      starts_at: asText(row.startIso) ?? unixToIso(row.startUnix),
+      image_url: asText(row.imageUrl),
+      tags: asText(row.eventTag) ? [asText(row.eventTag)!] : [],
       raw: row,
     };
   }
@@ -71,15 +70,17 @@ function normalizeItem(source: string, city: string, item: unknown): ListingDraf
   return null;
 }
 
+function poshUrl(row: Record<string, unknown>): string | undefined {
+  const full = asText(row.event_page_url);
+  if (full) return full;
+  const slug = asText(row.url) ?? asText(row.link);
+  if (!slug) return undefined;
+  return /^https?:\/\//.test(slug) ? slug : `https://posh.vip/${slug}`;
+}
+
 function unixToIso(value: unknown): string | undefined {
   const seconds = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : undefined;
-}
-
-function parseDiceDatetime(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
