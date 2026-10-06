@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { upsertListing, type ListingRow } from "../db/listings.ts";
+import { datedListingUrls, upsertListing, type ListingRow } from "../db/listings.ts";
 import { runActor } from "./apify.ts";
+import { fetchDiceDetails } from "./dice.ts";
 import { normalizeItems } from "./normalize.ts";
 import { scoreListings } from "./organize.ts";
 
@@ -11,6 +12,7 @@ type Source = "luma" | "posh" | "dice";
 export async function runIngest(cities = ingestCities()): Promise<void> {
   console.log(`[ingest] start cities=${cities.join(",")}`);
   const saved: ListingRow[] = [];
+  const enriched = new Set<string>();
 
   for (const city of cities) {
     for (const source of ingestSources()) {
@@ -18,8 +20,13 @@ export async function runIngest(cities = ingestCities()): Promise<void> {
         const items = await scrapeSource(source, city);
         const drafts = normalizeItems(source, city, items);
         console.log(`[ingest] ${source} ${city} items=${drafts.length}`);
+        const known = source === "dice" ? await datedListingUrls("dice") : new Set<string>();
         for (const draft of drafts) {
           if (!draft.url) continue;
+          if (source === "dice" && !draft.starts_at && !known.has(draft.url)) {
+            Object.assign(draft, definedOnly(await fetchDiceDetails(draft.url)));
+            if (draft.starts_at) enriched.add(draft.url);
+          }
           const row = await upsertListing(draft);
           if (row) saved.push(row);
         }
@@ -30,8 +37,13 @@ export async function runIngest(cities = ingestCities()): Promise<void> {
     }
   }
 
-  await scoreListings(saved);
-  console.log(`[ingest] done scored=${saved.length}`);
+  const unscored = saved.filter((row) => row.keep_score == null || (row.url !== null && enriched.has(row.url)));
+  await scoreListings(unscored);
+  console.log(`[ingest] done saved=${saved.length} scored=${unscored.length}`);
+}
+
+function definedOnly<T extends object>(value: T | null): Partial<T> {
+  return Object.fromEntries(Object.entries(value ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
 function ingestCities(): string[] {

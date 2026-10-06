@@ -40,29 +40,55 @@ export type ListingDraft = {
 
 export async function upsertListing(draft: ListingDraft): Promise<ListingRow | null> {
   const sb = getSupabase();
-  const row = {
+  // Only send fields the scraper actually returned, so a re-ingest never wipes
+  // stored dates or Jev scores (vibe, tags) with nulls.
+  const row: Record<string, unknown> = {
     source: draft.source,
-    source_id: draft.source_id ?? null,
     url: draft.url ?? null,
     title: draft.title,
-    description: draft.description ?? "",
     city: draft.city,
-    venue: draft.venue ?? null,
-    starts_at: draft.starts_at ?? null,
-    ends_at: draft.ends_at ?? null,
-    image_url: draft.image_url ?? null,
-    tags: draft.tags ?? [],
-    vibe: draft.vibe ?? null,
     raw: draft.raw ?? {},
     updated_at: new Date().toISOString(),
   };
+  const optional: Record<string, unknown> = {
+    source_id: draft.source_id,
+    description: draft.description || undefined,
+    venue: draft.venue,
+    starts_at: draft.starts_at,
+    ends_at: draft.ends_at,
+    image_url: draft.image_url,
+  };
+  for (const [key, value] of Object.entries(optional)) {
+    if (value !== undefined) row[key] = value;
+  }
 
   const { data, error } = await sb.from("listings").upsert(row, { onConflict: "source,url" }).select("*").single();
   if (error) {
     console.warn(`[listings] upsert failed: ${error.message}`);
     return null;
   }
-  return data as ListingRow;
+  const saved = data as ListingRow;
+
+  // Source tags only seed rows Jev hasn't scored yet; scored rows keep their picked tags.
+  if (saved.keep_score == null && draft.tags?.length) {
+    const tags = [...new Set([...saved.tags, ...draft.tags])];
+    await sb.from("listings").update({ tags }).eq("id", saved.id);
+    saved.tags = tags;
+  }
+  return saved;
+}
+
+export async function datedListingUrls(source: string): Promise<Set<string>> {
+  const { data, error } = await getSupabase()
+    .from("listings")
+    .select("url")
+    .eq("source", source)
+    .not("starts_at", "is", null);
+  if (error) {
+    console.warn(`[listings] dated url lookup failed: ${error.message}`);
+    return new Set();
+  }
+  return new Set((data ?? []).map((row: { url: string | null }) => row.url).filter((url): url is string => Boolean(url)));
 }
 
 export async function setListingOrganize(
@@ -81,32 +107,68 @@ export async function setListingOrganize(
 }
 
 export async function listKeptListings(city: string): Promise<EventRow[]> {
-  const needle = city.trim();
+  const slug = city.trim().toLowerCase();
+  const aliases = (slug === "nyc" || slug.includes("new york") ? ["nyc", "new york"] : [slug])
+    .map((alias) => alias.replace(/[^a-z0-9 ]/g, ""))
+    .filter(Boolean);
+  if (aliases.length === 0) return [];
+
   const { data, error } = await getSupabase()
     .from("listings")
     .select("*")
     .gte("keep_score", 0.55)
     .gte("starts_at", new Date().toISOString())
+    .or(aliases.map((alias) => `city.ilike.%${alias}%`).join(","))
     .order("starts_at", { ascending: true })
-    .limit(40);
+    .limit(120);
 
   if (error) {
     console.warn(`[listings] query failed: ${error.message}`);
     return [];
   }
 
-  const rows = (data ?? []) as ListingRow[];
-  const slug = needle.toLowerCase();
-  const aliases =
-    slug === "nyc" || slug.includes("new york")
-      ? ["nyc", "new york"]
-      : slug === "miami"
-        ? ["miami"]
-        : [slug];
-
-  return rows
-    .filter((row) => aliases.some((alias) => row.city.toLowerCase().includes(alias)))
+  return dedupeListings((data ?? []) as ListingRow[])
+    .slice(0, 40)
     .map(listingToEvent);
+}
+
+// The same night often shows up on several sources. Keep the best row of each group.
+export function dedupeListings(rows: ListingRow[]): ListingRow[] {
+  const best = [...rows].sort(
+    (a, b) =>
+      (b.keep_score ?? 0) - (a.keep_score ?? 0) ||
+      Number(Boolean(b.image_url)) - Number(Boolean(a.image_url)) ||
+      b.description.length - a.description.length,
+  );
+  const kept: ListingRow[] = [];
+  for (const row of best) {
+    if (!kept.some((other) => isSameEvent(row, other))) kept.push(row);
+  }
+  return kept.sort((a, b) => (a.starts_at ?? "").localeCompare(b.starts_at ?? ""));
+}
+
+function isSameEvent(a: ListingRow, b: ListingRow): boolean {
+  const titleA = normalizeTitle(a.title);
+  const titleB = normalizeTitle(b.title);
+  if (!titleA || !titleB) return false;
+  const similar =
+    titleA === titleB ||
+    (Math.min(titleA.length, titleB.length) >= 12 && (titleA.includes(titleB) || titleB.includes(titleA)));
+  if (!similar) return false;
+  // Same name on clearly different days is a recurring night, not a duplicate.
+  if (a.starts_at && b.starts_at) {
+    return Math.abs(Date.parse(a.starts_at) - Date.parse(b.starts_at)) < 24 * 60 * 60 * 1000;
+  }
+  return true;
+}
+
+function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function listingToEvent(row: ListingRow): EventRow {
