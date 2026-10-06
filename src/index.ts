@@ -3,6 +3,8 @@ import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { handleMessage } from "./handlers/message.ts";
+import { startIngestLoop } from "./ingest/schedule.ts";
+import { formatError } from "./utils/text.ts";
 
 const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
 
@@ -26,6 +28,7 @@ const app = await Spectrum({
 });
 
 console.log(`Agent online. provider=${PROVIDER}`);
+startIngestLoop();
 
 for await (const [space, message] of app.messages) {
   try {
@@ -33,9 +36,6 @@ for await (const [space, message] of app.messages) {
       await handleMessage(space, message);
     });
   } catch (err) {
-    console.error(
-      `[loop] error in space ${space.id}:`,
-      err instanceof Error ? err.message : String(err),
-    );
+    console.error(`[loop] error in space ${space.id}:`, formatError(err));
   }
 }

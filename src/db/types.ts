@@ -25,6 +25,8 @@ export type EventRow = {
   url: string | null;
   tags: string[];
   vibe: string | null;
+  music?: string | null;
+  crowd?: string | null;
   price_note: string | null;
   source: string;
   image_path: string | null;

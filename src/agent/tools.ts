@@ -2,14 +2,14 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { searchEvents } from "../db/events.ts";
 import { applyProfileUpdate, isOnboarded, updateProfile } from "../db/profiles.ts";
 import { listSaves, saveEvent } from "../db/saves.ts";
-import { rememberTaste } from "../db/taste.ts";
+import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { Profile, TasteKind } from "../db/types.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "search_events",
     description:
-      "Load the current Haps test catalog. Always returns these events. Use this before recommending. Do not invent events. Do not call until onboarding is complete.",
+      "Load nights for this city. Results already passed a keep filter and a vibe check (music + crowd vs the ask). Recommend only these. Do not invent events. Do not call until onboarding is complete.",
     input_schema: {
       type: "object",
       properties: {
@@ -18,7 +18,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         tags: {
           type: "array",
           items: { type: "string" },
-          description: "Catalog tags such as run, dj, wine, pottery, literary, film, art",
+          description: "Music or crowd tags such as house, techno, afro, hip-hop, latin, live, bottle service",
         },
         from: { type: "string", description: "ISO start of the window. Defaults to now." },
         to: { type: "string", description: "ISO end of the window. Defaults to 21 days out." },
@@ -116,12 +116,14 @@ export async function runTool(
       if (!city) {
         return { error: "city_required", hint: "Ask the user what city they are in, then call update_profile." };
       }
+      const taste = await listTaste(profile.id);
       const events = await searchEvents({
         city,
         query: asString(input.query),
         tags: asStringArray(input.tags),
         from: asString(input.from),
         to: asString(input.to),
+        taste,
       });
       return { count: events.length, events };
     }

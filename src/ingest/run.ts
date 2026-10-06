@@ -1,0 +1,99 @@
+import "dotenv/config";
+import { upsertListing, type ListingRow } from "../db/listings.ts";
+import { runActor } from "./apify.ts";
+import { normalizeItems } from "./normalize.ts";
+import { scoreListings } from "./organize.ts";
+
+const MAX_ITEMS = 15;
+
+type Source = "luma" | "posh" | "dice";
+
+export async function runIngest(cities = ingestCities()): Promise<void> {
+  console.log(`[ingest] start cities=${cities.join(",")}`);
+  const saved: ListingRow[] = [];
+
+  for (const city of cities) {
+    for (const source of ingestSources()) {
+      try {
+        const items = await scrapeSource(source, city);
+        const drafts = normalizeItems(source, city, items);
+        console.log(`[ingest] ${source} ${city} items=${drafts.length}`);
+        for (const draft of drafts) {
+          if (!draft.url) continue;
+          const row = await upsertListing(draft);
+          if (row) saved.push(row);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[ingest] ${source} ${city} failed: ${msg}`);
+      }
+    }
+  }
+
+  await scoreListings(saved);
+  console.log(`[ingest] done scored=${saved.length}`);
+}
+
+function ingestCities(): string[] {
+  const raw = process.env.INGEST_CITIES ?? "Miami";
+  return raw.split(",").map((part) => part.trim()).filter(Boolean);
+}
+
+function ingestSources(): Source[] {
+  const raw = (process.env.INGEST_SOURCES ?? "luma,posh,dice").toLowerCase();
+  return raw.split(",").filter((part): part is Source => part === "luma" || part === "posh" || part === "dice");
+}
+
+async function scrapeSource(source: Source, city: string): Promise<unknown[]> {
+  if (source === "luma") {
+    return runActor("aitorsm/luma-events", {
+      searchType: "city",
+      city: lumaCity(city),
+      period: "future",
+      maxItems: MAX_ITEMS,
+      enrichEventDetails: false,
+    });
+  }
+  if (source === "posh") {
+    return runActor("aitorsm/posh-events", {
+      searchType: "city",
+      city: poshCity(city),
+      when: "This Weekend",
+      sort: "Trending",
+      maxItems: MAX_ITEMS,
+      enrichOrganizers: false,
+    });
+  }
+  return runActor("lexis-solutions/dice-fm", {
+    query: diceCity(city),
+    type: "city",
+    eventCategory: "party",
+    maxItems: MAX_ITEMS,
+    proxyConfiguration: { useApifyProxy: true, apifyProxyGroups: [] },
+  });
+}
+
+function lumaCity(city: string): string {
+  const slug = city.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (slug === "nyc" || slug.includes("newyork")) return "nyc";
+  if (slug === "miami") return "miami";
+  return city.toLowerCase();
+}
+
+function poshCity(city: string): string {
+  const slug = city.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (slug === "nyc" || slug.includes("newyork")) return "New York City";
+  if (slug === "miami") return "Miami";
+  return city;
+}
+
+function diceCity(city: string): string {
+  const slug = city.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (slug === "nyc" || slug.includes("newyork")) return "New York";
+  return city;
+}
+
+const isMain = process.argv[1]?.includes("ingest/run");
+if (isMain) {
+  await runIngest();
+}

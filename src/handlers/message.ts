@@ -1,11 +1,11 @@
 import { attachment, group, type Message, type Space } from "spectrum-ts";
 import { generateReply } from "../agent/claude.ts";
-import { formatCatalogOverview, listCatalogEvents } from "../db/events.ts";
+import { formatCatalogOverview, getLastSearchEvents } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
 import { upsertProfile } from "../db/profiles.ts";
 import { listTaste } from "../db/taste.ts";
 import { appendTurn, getHistory } from "../memory/history.ts";
-import { extractText, sanitizeOutgoingText } from "../utils/text.ts";
+import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
 
 const FALLBACK_REPLY = "Sorry, I hit an error on my end. Try me again in a sec?";
 
@@ -30,20 +30,21 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}`);
 
   const platform = message.platform || "imessage";
-  const profile = await upsertProfile(platform, senderId);
-  const [taste, saves] = await Promise.all([listTaste(profile.id), listSaves(profile.id)]);
-  const history = getHistory(senderId);
-
   let reply: string;
   let imagePaths: string[] = [];
   try {
+    const profile = await upsertProfile(platform, senderId);
+    const [taste, saves] = await Promise.all([listTaste(profile.id), listSaves(profile.id)]);
+    const history = getHistory(senderId);
     const generated = await generateReply({ profile, taste, saves, history, userMessage: text });
     imagePaths = generated.imagePaths;
-    reply = imagePaths.length > 0
-      ? formatCatalogOverview(await listCatalogEvents())
-      : sanitizeOutgoingText(generated.text);
+    reply = sanitizeOutgoingText(
+      imagePaths.length > 0
+        ? formatCatalogOverview(getLastSearchEvents())
+        : generated.text,
+    );
   } catch (err) {
-    console.error(`[claude] failed for sender=${senderId}:`, err instanceof Error ? err.message : err);
+    console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
     await space.send(FALLBACK_REPLY);
     return;
   }
@@ -58,7 +59,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   appendTurn(senderId, { role: "assistant", content: reply });
 
   console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)} images=${imagePaths.length}`);
-  const flyers = imagePaths.map((path) => attachment(path));
+  const flyers = imagePaths.map(flyerAttachment);
   const first = flyers[0];
   const second = flyers[1];
   if (first && second) {
@@ -68,4 +69,11 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   } else {
     await space.send(reply);
   }
+}
+
+function flyerAttachment(ref: string) {
+  if (/^https?:\/\//i.test(ref)) {
+    return attachment(new URL(ref), { mimeType: "image/jpeg", name: "flyer.jpg" });
+  }
+  return attachment(ref);
 }

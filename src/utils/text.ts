@@ -15,5 +15,20 @@ export function sanitizeOutgoingText(text: string): string {
     .replace(/\*([^*]+)\*/g, "$1")
     .replace(/\*/g, "")
     .replace(/`{1,3}/g, "")
+    .replace(/\s*[—–]\s*/g, ". ")
+    .replace(/[ \t]+\./g, ".")
+    .replace(/\.\s*\./g, ".")
     .trim();
+}
+
+export function formatError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== "{}") return json;
+  } catch {
+    // fall through
+  }
+  return String(err);
 }
