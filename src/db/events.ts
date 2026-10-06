@@ -34,35 +34,68 @@ export async function listCatalogEvents(): Promise<EventRow[]> {
 
 let lastSearch: EventRow[] = [];
 
+const MAX_RECS = 5;
+
+/** One slot per night: collapse "(Friday Pass)" style series, then cap the list. */
+function topPicks(events: EventRow[]): EventRow[] {
+  const seen = new Set<string>();
+  const picks: EventRow[] = [];
+  for (const event of events) {
+    const key = event.title
+      .toLowerCase()
+      .replace(/\(.*?\)/g, " ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picks.push(event);
+    if (picks.length >= MAX_RECS) break;
+  }
+  return picks;
+}
+
 export function getLastSearchEvents(): EventRow[] {
   return lastSearch;
 }
 
+const DEFAULT_WINDOW_MS = 21 * 24 * 60 * 60 * 1000;
+
+function withinWindow(events: EventRow[], input: EventSearch): EventRow[] {
+  const from = Date.parse(input.from ?? "") || Date.now();
+  const to = Date.parse(input.to ?? "") || Date.now() + DEFAULT_WINDOW_MS;
+  return events.filter((event) => {
+    const start = Date.parse(event.starts_at);
+    return Number.isNaN(start) || (start >= from && start <= to);
+  });
+}
+
 /** Rank ingested nights, then the test catalog, against the user's ask and taste. */
 export async function searchEvents(input: EventSearch): Promise<EventRow[]> {
-  const ingested = await listKeptListings(input.city);
+  const ingested = withinWindow(await listKeptListings(input.city), input);
   if (ingested.length > 0) {
-    lastSearch = ingested;
+    let ordered = ingested;
     try {
       const ranked = await rankNights(ingested, input);
-      if (ranked.length > 0) lastSearch = ranked;
-      console.log(`[search] listings ${lastSearch.length}/${ingested.length} for ${input.city}`);
+      if (ranked.length > 0) ordered = ranked;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[jev] listing rank failed: ${msg}`);
     }
+    lastSearch = topPicks(ordered);
+    console.log(`[search] listings ${lastSearch.length}/${ingested.length} for ${input.city}`);
     return lastSearch;
   }
 
   const catalog = await listCatalogEvents();
-  lastSearch = catalog;
+  let ordered = catalog;
   try {
     const ranked = await rankNights(catalog, input);
-    if (ranked.length > 0) lastSearch = ranked;
+    if (ranked.length > 0) ordered = ranked;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[jev] rank failed: ${msg}`);
   }
+  lastSearch = topPicks(ordered);
   return lastSearch;
 }
 
@@ -77,16 +110,13 @@ export async function getEvent(id: string): Promise<EventRow | null> {
   return (data as EventRow | null) ?? null;
 }
 
+/** Fallback only, used when Claude returns no text. Short on purpose. */
 export function formatCatalogOverview(events: EventRow[]): string {
-  const lines = events.map((event) => {
-    const where = [event.venue, event.city].filter(Boolean).join(", ");
-    const hook =
-      event.vibe ||
-      [event.music, event.crowd].filter(Boolean).join(", ") ||
-      event.tags.slice(0, 3).join(", ");
-    return where ? `${event.title}. ${hook}. ${where}.` : `${event.title}. ${hook}.`;
+  const lines = events.slice(0, 3).map((event) => {
+    const where = event.venue ? ` at ${event.venue}` : "";
+    return `${event.title}${where}`;
   });
-  return `Here's what I found.\n\n${lines.join("\n")}`;
+  return `got a few for you: ${lines.join(", ")}. want me to dig into one?`;
 }
 
 export async function listEventFlyers(): Promise<string[]> {

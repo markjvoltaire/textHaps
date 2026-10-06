@@ -38,11 +38,10 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const history = getHistory(senderId);
     const generated = await generateReply({ profile, taste, saves, history, userMessage: text });
     imagePaths = generated.imagePaths;
-    reply = sanitizeOutgoingText(
-      imagePaths.length > 0
-        ? formatCatalogOverview(getLastSearchEvents())
-        : generated.text,
-    );
+    reply = sanitizeOutgoingText(generated.text);
+    if (!reply && imagePaths.length > 0) {
+      reply = sanitizeOutgoingText(formatCatalogOverview(getLastSearchEvents()));
+    }
   } catch (err) {
     console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
     await space.send(FALLBACK_REPLY);
@@ -59,15 +58,21 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   appendTurn(senderId, { role: "assistant", content: reply });
 
   console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)} images=${imagePaths.length}`);
+  // Short texts, not one block: each blank-line-separated chunk goes out as its own bubble.
+  const [lead = reply, ...rest] = reply.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
   const flyers = imagePaths.map(flyerAttachment);
   const first = flyers[0];
   const second = flyers[1];
   if (first && second) {
-    await space.send(group(first, second, ...flyers.slice(2)), reply);
+    await space.send(group(first, second, ...flyers.slice(2)), lead);
   } else if (first) {
-    await space.send(first, reply);
+    await space.send(first, lead);
   } else {
-    await space.send(reply);
+    await space.send(lead);
+  }
+  for (const bubble of rest.slice(0, 2)) {
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await space.send(bubble);
   }
 }
 

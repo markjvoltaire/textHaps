@@ -20,8 +20,8 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
           items: { type: "string" },
           description: "Music or crowd tags such as house, techno, afro, hip-hop, latin, live, bottle service",
         },
-        from: { type: "string", description: "ISO start of the window. Defaults to now." },
-        to: { type: "string", description: "ISO end of the window. Defaults to 21 days out." },
+        from: { type: "string", description: "ISO start of the window. Defaults to now. Set it when they ask about a specific day or weekend." },
+        to: { type: "string", description: "ISO end of the window. Defaults to 21 days out. For 'this weekend' use the coming Sunday night." },
       },
       additionalProperties: false,
     },
@@ -81,6 +81,27 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
 
 type ToolInput = Record<string, unknown>;
 
+/** "Fri 10pm", in the time zone the supported cities share (Miami and NYC). */
+function friendlyWhen(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  const minute = get("minute") === "00" ? "" : `:${get("minute")}`;
+  const time = `${get("hour")}${minute}${get("dayPeriod").toLowerCase()}`;
+  // Past a week out a bare weekday is ambiguous, so say which one.
+  if (date.getTime() - Date.now() > 6 * 24 * 60 * 60 * 1000) {
+    const day = date.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric" });
+    return `${get("weekday")} ${day} ${time}`;
+  }
+  return `${get("weekday")} ${time}`;
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -125,7 +146,19 @@ export async function runTool(
         to: asString(input.to),
         taste,
       });
-      return { count: events.length, events };
+      return {
+        count: events.length,
+        events: events.map((event) => ({
+          id: event.id,
+          title: event.title,
+          when: friendlyWhen(event.starts_at),
+          venue: event.venue,
+          music: event.music,
+          crowd: event.crowd,
+          vibe: event.vibe,
+          price_note: event.price_note,
+        })),
+      };
     }
     case "remember_taste": {
       if (!isTasteKind(input.kind) || !asString(input.label)) {
