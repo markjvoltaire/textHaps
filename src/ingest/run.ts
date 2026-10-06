@@ -37,7 +37,10 @@ export async function runIngest(cities = ingestCities()): Promise<void> {
     }
   }
 
-  const unscored = saved.filter((row) => row.keep_score == null || (row.url !== null && enriched.has(row.url)));
+  const rescoreAll = process.env.INGEST_RESCORE === "1";
+  const unscored = saved.filter(
+    (row) => rescoreAll || row.keep_score == null || (row.url !== null && enriched.has(row.url)),
+  );
   await scoreListings(unscored);
   console.log(`[ingest] done saved=${saved.length} scored=${unscored.length}`);
 }
@@ -63,7 +66,7 @@ async function scrapeSource(source: Source, city: string): Promise<unknown[]> {
       city: lumaCity(city),
       period: "future",
       maxItems: MAX_ITEMS,
-      enrichEventDetails: false,
+      enrichEventDetails: true,
     });
   }
   if (source === "posh") {

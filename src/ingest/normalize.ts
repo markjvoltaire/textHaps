@@ -20,7 +20,7 @@ function normalizeItem(source: string, city: string, item: unknown): ListingDraf
       source_id: asText(event.api_id) ?? asText(event.id),
       url: asText(event.url) ?? asText(row.url),
       title,
-      description: asText(event.description) ?? "",
+      description: asText(event.description) ?? asText(row.description) ?? "",
       city: asText(geo?.city) ?? city,
       venue: asText(geo?.full_address) ?? asText(geo?.short_address),
       starts_at: asText(event.start_at),
