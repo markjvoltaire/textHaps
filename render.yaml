@@ -1,0 +1,26 @@
+services:
+  - type: worker
+    name: texthaps-agent
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: PROJECT_ID
+        sync: false
+      - key: PROJECT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: JEV_API_KEY
+        sync: false
+      - key: APIFY_API_TOKEN
+        sync: false
+      - key: TYPESAFE_API_KEY
+        sync: false
