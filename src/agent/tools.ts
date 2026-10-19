@@ -1,15 +1,15 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { searchEvents } from "../db/events.ts";
-import { applyProfileUpdate, isOnboarded, updateProfile } from "../db/profiles.ts";
+import { applyProfileUpdate, updateProfile } from "../db/profiles.ts";
 import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
-import type { Profile, TasteKind } from "../db/types.ts";
+import type { EventRow, Profile, TasteKind } from "../db/types.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "search_events",
     description:
-      "Load nights for this city. Results already passed a keep filter and a vibe check (music + crowd vs the ask). Recommend only these. Do not invent events. Do not call until onboarding is complete.",
+      "Load nights for this city. Results already passed a keep filter and a vibe check (music + crowd vs the ask). Recommend only these. Do not invent events. Do not call until you know their taste and city.",
     input_schema: {
       type: "object",
       properties: {
@@ -29,7 +29,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "remember_taste",
     description:
-      "Store a lasting preference. Use when the user likes, dislikes, or constrains something.",
+      "Store a lasting preference. Use when the user likes, dislikes, or constrains something. During onboarding call it once per music style, vibe, or usual spot they mention (kind like, short label such as house, rooftop day parties, club space).",
     input_schema: {
       type: "object",
       required: ["kind", "label"],
@@ -67,7 +67,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "update_profile",
     description:
-      "Save onboarding fields as the user gives them: name and city. Call this whenever they provide either.",
+      "Save their city (and name, if they offer it). Call this whenever they mention where they live or go out.",
     input_schema: {
       type: "object",
       properties: {
@@ -120,24 +120,30 @@ function isTasteKind(value: unknown): value is TasteKind {
   return value === "like" || value === "dislike" || value === "constraint";
 }
 
+/** Per-reply state. Each reply gets its own, so one user's search never leaks into another's. */
+export type ToolSession = {
+  searched: EventRow[];
+};
+
 export async function runTool(
   profile: Profile,
   name: string,
   input: ToolInput,
+  session: ToolSession,
 ): Promise<unknown> {
   switch (name) {
     case "search_events": {
-      if (!isOnboarded(profile)) {
+      const taste = await listTaste(profile.id);
+      if (!taste.some((signal) => signal.kind === "like")) {
         return {
-          error: "onboarding_incomplete",
-          hint: "Ask for name, then city. Save them with update_profile first.",
+          error: "taste_required",
+          hint: "Ask about their vibe, music, and usual spots first. Save each with remember_taste.",
         };
       }
       const city = asString(input.city) ?? profile.city;
       if (!city) {
         return { error: "city_required", hint: "Ask the user what city they are in, then call update_profile." };
       }
-      const taste = await listTaste(profile.id);
       const events = await searchEvents({
         city,
         query: asString(input.query),
@@ -146,6 +152,7 @@ export async function runTool(
         to: asString(input.to),
         taste,
       });
+      session.searched = events;
       return {
         count: events.length,
         events: events.map((event) => ({
@@ -155,7 +162,6 @@ export async function runTool(
           venue: event.venue,
           music: event.music,
           crowd: event.crowd,
-          vibe: event.vibe,
           price_note: event.price_note,
         })),
       };
@@ -197,11 +203,7 @@ export async function runTool(
         ...(city ? { city } : {}),
       });
       applyProfileUpdate(profile, updated);
-      return {
-        name: updated.name,
-        city: updated.city,
-        onboarded: isOnboarded(profile),
-      };
+      return { name: updated.name, city: updated.city };
     }
     default:
       return { error: `unknown tool ${name}` };

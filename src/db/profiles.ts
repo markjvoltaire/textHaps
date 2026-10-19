@@ -1,5 +1,5 @@
 import { getSupabase } from "./client.ts";
-import type { OnboardingField, Profile } from "./types.ts";
+import type { OnboardingField, Profile, TasteSignal } from "./types.ts";
 
 export type ProfilePatch = {
   name?: string;
@@ -51,19 +51,20 @@ export async function updateProfile(profileId: string, patch: ProfilePatch): Pro
   return data as Profile;
 }
 
-export function missingOnboarding(profile: Profile): OnboardingField[] {
+/** Onboarding is done once we know their taste (vibe, music, places) and city. Name is optional. */
+export function missingOnboarding(profile: Profile, taste: TasteSignal[]): OnboardingField[] {
   const missing: OnboardingField[] = [];
-  if (!profile.name?.trim()) missing.push("name");
+  if (!taste.some((signal) => signal.kind === "like")) missing.push("taste");
   if (!profile.city?.trim()) missing.push("city");
   return missing;
 }
 
-export function nextOnboardingField(profile: Profile): OnboardingField | null {
-  return missingOnboarding(profile)[0] ?? null;
+export function nextOnboardingField(profile: Profile, taste: TasteSignal[]): OnboardingField | null {
+  return missingOnboarding(profile, taste)[0] ?? null;
 }
 
-export function isOnboarded(profile: Profile): boolean {
-  return missingOnboarding(profile).length === 0;
+export function isOnboarded(profile: Profile, taste: TasteSignal[]): boolean {
+  return missingOnboarding(profile, taste).length === 0;
 }
 
 export function applyProfileUpdate(profile: Profile, updated: Profile): void {

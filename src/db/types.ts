@@ -1,7 +1,7 @@
 export type TasteKind = "like" | "dislike" | "constraint";
 export type TasteSource = "explicit" | "inferred";
 
-export type OnboardingField = "name" | "city";
+export type OnboardingField = "taste" | "city";
 
 export type Profile = {
   id: string;

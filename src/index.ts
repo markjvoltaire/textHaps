@@ -3,7 +3,6 @@ import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { handleMessage } from "./handlers/message.ts";
-import { startIngestLoop } from "./ingest/schedule.ts";
 import { formatError } from "./utils/text.ts";
 
 const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
@@ -28,14 +27,19 @@ const app = await Spectrum({
 });
 
 console.log(`Agent online. provider=${PROVIDER}`);
-startIngestLoop();
+
+// One queue per sender: their messages stay in order, but a slow reply never blocks anyone else.
+const queues = new Map<string, Promise<void>>();
 
 for await (const [space, message] of app.messages) {
-  try {
-    await space.responding(async () => {
-      await handleMessage(space, message);
+  const key = message.sender?.id ?? space.id;
+  const next = (queues.get(key) ?? Promise.resolve())
+    .then(() => space.responding(() => handleMessage(space, message)))
+    .catch((err: unknown) => {
+      console.error(`[loop] error in space ${space.id}:`, formatError(err));
     });
-  } catch (err) {
-    console.error(`[loop] error in space ${space.id}:`, formatError(err));
-  }
+  queues.set(key, next);
+  void next.then(() => {
+    if (queues.get(key) === next) queues.delete(key);
+  });
 }

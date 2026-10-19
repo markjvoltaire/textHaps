@@ -32,8 +32,6 @@ export async function listCatalogEvents(): Promise<EventRow[]> {
   return (data ?? []) as EventRow[];
 }
 
-let lastSearch: EventRow[] = [];
-
 const MAX_RECS = 5;
 
 /** One slot per night: collapse "(Friday Pass)" style series, then cap the list. */
@@ -52,10 +50,6 @@ function topPicks(events: EventRow[]): EventRow[] {
     if (picks.length >= MAX_RECS) break;
   }
   return picks;
-}
-
-export function getLastSearchEvents(): EventRow[] {
-  return lastSearch;
 }
 
 const DEFAULT_WINDOW_MS = 21 * 24 * 60 * 60 * 1000;
@@ -81,9 +75,9 @@ export async function searchEvents(input: EventSearch): Promise<EventRow[]> {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[jev] listing rank failed: ${msg}`);
     }
-    lastSearch = topPicks(ordered);
-    console.log(`[search] listings ${lastSearch.length}/${ingested.length} for ${input.city}`);
-    return lastSearch;
+    const picks = topPicks(ordered);
+    console.log(`[search] listings ${picks.length}/${ingested.length} for ${input.city}`);
+    return picks;
   }
 
   const catalog = await listCatalogEvents();
@@ -95,8 +89,7 @@ export async function searchEvents(input: EventSearch): Promise<EventRow[]> {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[jev] rank failed: ${msg}`);
   }
-  lastSearch = topPicks(ordered);
-  return lastSearch;
+  return topPicks(ordered);
 }
 
 export async function getEvent(id: string): Promise<EventRow | null> {
@@ -119,9 +112,9 @@ export function formatCatalogOverview(events: EventRow[]): string {
   return `got a few for you: ${lines.join(", ")}. want me to dig into one?`;
 }
 
-export async function listEventFlyers(): Promise<string[]> {
-  const source = lastSearch.length > 0 ? lastSearch : await listCatalogEvents();
-  return source
+/** Flyers for the nights this reply actually searched. No search, no flyers. */
+export function eventFlyers(events: EventRow[]): string[] {
+  return events
     .map((event) => event.image_path)
     .filter((path): path is string => Boolean(path))
     .map(resolveEventImage);

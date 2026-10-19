@@ -1,13 +1,15 @@
 import { attachment, group, type Message, type Space } from "spectrum-ts";
 import { generateReply } from "../agent/claude.ts";
-import { formatCatalogOverview, getLastSearchEvents } from "../db/events.ts";
+import { formatCatalogOverview } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
 import { upsertProfile } from "../db/profiles.ts";
 import { listTaste } from "../db/taste.ts";
-import { appendTurn, getHistory } from "../memory/history.ts";
+import { appendExchange, getHistory } from "../memory/history.ts";
+import { checkRateLimit, shouldWarn } from "./rateLimit.ts";
 import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
 
-const FALLBACK_REPLY = "Sorry, I hit an error on my end. Try me again in a sec?";
+const FALLBACK_REPLY = "ugh my bad, something glitched. try me again?";
+const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
 
 export async function handleMessage(space: Space, message: Message): Promise<void> {
   if (message.direction === "outbound") return;
@@ -30,17 +32,28 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}`);
 
   const platform = message.platform || "imessage";
+  let profileId: string;
   let reply: string;
   let imagePaths: string[] = [];
   try {
     const profile = await upsertProfile(platform, senderId);
-    const [taste, saves] = await Promise.all([listTaste(profile.id), listSaves(profile.id)]);
-    const history = getHistory(senderId);
+    profileId = profile.id;
+    const limit = await checkRateLimit(profile.id);
+    if (!limit.ok) {
+      console.warn(`[limit] sender=${senderId} over ${limit.window} limit`);
+      if (shouldWarn(profile.id, limit.window)) await space.send(RATE_LIMIT_REPLY);
+      return;
+    }
+    const [taste, saves, history] = await Promise.all([
+      listTaste(profile.id),
+      listSaves(profile.id),
+      getHistory(profile.id),
+    ]);
     const generated = await generateReply({ profile, taste, saves, history, userMessage: text });
     imagePaths = generated.imagePaths;
     reply = sanitizeOutgoingText(generated.text);
     if (!reply && imagePaths.length > 0) {
-      reply = sanitizeOutgoingText(formatCatalogOverview(getLastSearchEvents()));
+      reply = sanitizeOutgoingText(formatCatalogOverview(generated.events));
     }
   } catch (err) {
     console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
@@ -54,8 +67,11 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   }
 
   // Only commit the exchange once the model actually produced something.
-  appendTurn(senderId, { role: "user", content: text });
-  appendTurn(senderId, { role: "assistant", content: reply });
+  // Keep only what the user actually sees: the lead plus up to 2 more bubbles.
+  const sent = reply.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean).slice(0, 3);
+  await appendExchange(profileId, text, sent.join("\n\n")).catch((err: unknown) => {
+    console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
+  });
 
   console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)} images=${imagePaths.length}`);
   // Short texts, not one block: each blank-line-separated chunk goes out as its own bubble.

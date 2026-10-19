@@ -107,5 +107,12 @@ function diceCity(city: string): string {
 
 const isMain = process.argv[1]?.includes("ingest/run");
 if (isMain) {
-  await runIngest();
+  // Runs as a Render cron job, so exit explicitly once done instead of waiting on open sockets.
+  try {
+    await runIngest();
+    process.exit(0);
+  } catch (err) {
+    console.error(`[ingest] failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }

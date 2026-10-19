@@ -20,7 +20,26 @@ services:
         sync: false
       - key: JEV_API_KEY
         sync: false
+      - key: TYPESAFE_API_KEY
+        sync: false
+  - type: cron
+    name: texthaps-ingest
+    runtime: node
+    plan: starter
+    # Every 6 hours (UTC). Each run costs roughly $1.35 in Apify per city.
+    schedule: "0 */6 * * *"
+    buildCommand: npm ci
+    startCommand: npm run ingest
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
       - key: APIFY_API_TOKEN
+        sync: false
+      - key: JEV_API_KEY
         sync: false
       - key: TYPESAFE_API_KEY
         sync: false
