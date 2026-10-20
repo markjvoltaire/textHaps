@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { datedListingUrls, upsertListing, type ListingRow } from "../db/listings.ts";
+import { datedListingUrls, listUnscoredListings, upsertListing, type ListingRow } from "../db/listings.ts";
 import { runActor } from "./apify.ts";
 import { fetchDiceDetails } from "./dice.ts";
 import { normalizeItems } from "./normalize.ts";
@@ -13,9 +13,11 @@ export async function runIngest(cities = ingestCities()): Promise<void> {
   console.log(`[ingest] start cities=${cities.join(",")}`);
   const saved: ListingRow[] = [];
   const enriched = new Set<string>();
+  const sources = ingestSources();
+  let failures = 0;
 
   for (const city of cities) {
-    for (const source of ingestSources()) {
+    for (const source of sources) {
       try {
         const items = await scrapeSource(source, city);
         const drafts = normalizeItems(source, city, items);
@@ -33,16 +35,26 @@ export async function runIngest(cities = ingestCities()): Promise<void> {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[ingest] ${source} ${city} failed: ${msg}`);
+        failures += 1;
       }
     }
   }
 
+  // Score this run's new or re-dated rows, plus any upcoming row an earlier run failed to score.
   const rescoreAll = process.env.INGEST_RESCORE === "1";
-  const unscored = saved.filter(
-    (row) => rescoreAll || row.keep_score == null || (row.url !== null && enriched.has(row.url)),
-  );
-  await scoreListings(unscored);
-  console.log(`[ingest] done saved=${saved.length} scored=${unscored.length}`);
+  const toScore = new Map<string, ListingRow>();
+  for (const row of saved) {
+    if (rescoreAll || row.keep_score == null || (row.url !== null && enriched.has(row.url))) toScore.set(row.id, row);
+  }
+  for (const row of await listUnscoredListings()) toScore.set(row.id, row);
+  await scoreListings([...toScore.values()]);
+  console.log(`[ingest] done saved=${saved.length} scored=${toScore.size} failed_sources=${failures}`);
+
+  // Partial failures only warn. Every source failing is a broken run, so the cron should go red.
+  const attempts = cities.length * sources.length;
+  if (attempts > 0 && failures === attempts) {
+    throw new Error(`all ${attempts} source scrapes failed`);
+  }
 }
 
 function definedOnly<T extends object>(value: T | null): Partial<T> {

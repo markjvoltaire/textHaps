@@ -29,6 +29,7 @@ export type ListingDraft = {
   title: string;
   description?: string;
   city: string;
+  metro: string;
   venue?: string;
   starts_at?: string;
   ends_at?: string;
@@ -47,6 +48,7 @@ export async function upsertListing(draft: ListingDraft): Promise<ListingRow | n
     url: draft.url ?? null,
     title: draft.title,
     city: draft.city,
+    metro: draft.metro,
     raw: draft.raw ?? {},
     updated_at: new Date().toISOString(),
   };
@@ -91,6 +93,27 @@ export async function datedListingUrls(source: string): Promise<Set<string>> {
   return new Set((data ?? []).map((row: { url: string | null }) => row.url).filter((url): url is string => Boolean(url)));
 }
 
+export async function getListing(id: string): Promise<ListingRow | null> {
+  const { data, error } = await getSupabase().from("listings").select("*").eq("id", id).maybeSingle();
+  if (error) throw error;
+  return (data as ListingRow | null) ?? null;
+}
+
+/** Upcoming rows Jev never scored (a failed chunk, say), so each run retries them. */
+export async function listUnscoredListings(): Promise<ListingRow[]> {
+  const { data, error } = await getSupabase()
+    .from("listings")
+    .select("*")
+    .is("keep_score", null)
+    .gte("starts_at", new Date().toISOString())
+    .limit(200);
+  if (error) {
+    console.warn(`[listings] unscored lookup failed: ${error.message}`);
+    return [];
+  }
+  return (data ?? []) as ListingRow[];
+}
+
 export async function setListingOrganize(
   id: string,
   patch: {
@@ -106,19 +129,15 @@ export async function setListingOrganize(
   if (error) console.warn(`[listings] score failed: ${error.message}`);
 }
 
-export async function listKeptListings(city: string): Promise<EventRow[]> {
-  const slug = city.trim().toLowerCase();
-  const aliases = (slug === "nyc" || slug.includes("new york") ? ["nyc", "new york"] : [slug])
-    .map((alias) => alias.replace(/[^a-z0-9 ]/g, ""))
-    .filter(Boolean);
-  if (aliases.length === 0) return [];
-
+/** Kept listings in a metro, filtered to the asked window in the query itself so later dates aren't cut off. */
+export async function listKeptListings(metro: string, from: Date, to: Date): Promise<EventRow[]> {
   const { data, error } = await getSupabase()
     .from("listings")
     .select("*")
+    .eq("metro", metro)
     .gte("keep_score", 0.55)
-    .gte("starts_at", new Date().toISOString())
-    .or(aliases.map((alias) => `city.ilike.%${alias}%`).join(","))
+    .gte("starts_at", from.toISOString())
+    .lte("starts_at", to.toISOString())
     .order("starts_at", { ascending: true })
     .limit(120);
 

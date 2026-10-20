@@ -1,3 +1,5 @@
+import type { ListingRow } from "./listings.ts";
+
 export type TasteKind = "like" | "dislike" | "constraint";
 export type TasteSource = "explicit" | "inferred";
 
@@ -47,9 +49,10 @@ export type SaveRow = {
   id: string;
   profile_id: string;
   event_id: string | null;
+  listing_id: string | null;
   url: string | null;
   title: string | null;
   note: string | null;
   created_at: string;
-  event?: EventRow | null;
+  listing?: ListingRow | null;
 };

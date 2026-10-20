@@ -1,12 +1,16 @@
 import type { ListingDraft } from "../db/listings.ts";
+import { metroFor } from "../utils/metro.ts";
 
+/** `city` is the city we scraped for. It sets the metro, whatever neighborhood the source reports. */
 export function normalizeItems(source: string, city: string, items: unknown[]): ListingDraft[] {
+  const metro = metroFor(city);
   return items
     .map((item) => normalizeItem(source, city, item))
-    .filter((draft): draft is ListingDraft => Boolean(draft));
+    .filter((draft): draft is Omit<ListingDraft, "metro"> => Boolean(draft))
+    .map((draft) => ({ ...draft, metro }));
 }
 
-function normalizeItem(source: string, city: string, item: unknown): ListingDraft | null {
+function normalizeItem(source: string, city: string, item: unknown): Omit<ListingDraft, "metro"> | null {
   if (!item || typeof item !== "object") return null;
   const row = item as Record<string, unknown>;
 
@@ -22,7 +26,8 @@ function normalizeItem(source: string, city: string, item: unknown): ListingDraf
       title,
       description: asText(event.description) ?? asText(row.description) ?? "",
       city: asText(geo?.city) ?? city,
-      venue: asText(geo?.full_address) ?? asText(geo?.short_address),
+      // `address` is the place name ("Magic 13 Brewing Co."); full_address is the street address.
+      venue: asText(geo?.address),
       starts_at: asText(event.start_at),
       ends_at: asText(event.end_at),
       image_url: asText(event.cover_url),

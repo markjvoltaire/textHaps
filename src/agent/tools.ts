@@ -43,11 +43,11 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "save_event",
-    description: "Save a catalog event or a URL the user sent so Haps can remember it later.",
+    description: "Save an event from search_events or a URL the user sent so Haps can remember it later.",
     input_schema: {
       type: "object",
       properties: {
-        event_id: { type: "string", description: "Catalog event UUID from search_events" },
+        event_id: { type: "string", description: "Event id from search_events" },
         url: { type: "string", description: "A link the user shared that is not in the catalog" },
         title: { type: "string" },
         note: { type: "string" },
@@ -181,7 +181,7 @@ export async function runTool(
     case "save_event": {
       const saved = await saveEvent({
         profileId: profile.id,
-        eventId: asString(input.event_id),
+        listingId: asString(input.event_id),
         url: asString(input.url),
         title: asString(input.title),
         note: asString(input.note),

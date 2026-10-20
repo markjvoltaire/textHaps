@@ -1,11 +1,13 @@
 import { getSupabase } from "./client.ts";
-import { getEvent } from "./events.ts";
-import type { EventRow, SaveRow } from "./types.ts";
+import { getListing, type ListingRow } from "./listings.ts";
+import type { SaveRow } from "./types.ts";
+
+const SAVE_SELECT = "*, listing:listings(*)";
 
 export async function listSaves(profileId: string): Promise<SaveRow[]> {
   const { data, error } = await getSupabase()
     .from("saves")
-    .select("*, event:events(*)")
+    .select(SAVE_SELECT)
     .eq("profile_id", profileId)
     .order("created_at", { ascending: false })
     .limit(20);
@@ -16,39 +18,40 @@ export async function listSaves(profileId: string): Promise<SaveRow[]> {
 
 export async function saveEvent(input: {
   profileId: string;
-  eventId?: string;
+  listingId?: string;
   url?: string;
   title?: string;
   note?: string;
 }): Promise<SaveRow> {
-  if (!input.eventId && !input.url) {
+  if (!input.listingId && !input.url) {
     throw new Error("save_event needs an event_id or a url");
   }
 
   const sb = getSupabase();
 
-  if (input.eventId) {
+  if (input.listingId) {
     const { data: existing, error: lookupError } = await sb
       .from("saves")
-      .select("*, event:events(*)")
+      .select(SAVE_SELECT)
       .eq("profile_id", input.profileId)
-      .eq("event_id", input.eventId)
+      .eq("listing_id", input.listingId)
       .maybeSingle();
 
     if (lookupError) throw lookupError;
     if (existing) return existing as SaveRow;
 
-    const event = await getEvent(input.eventId);
+    const listing = await getListing(input.listingId);
+    if (!listing) throw new Error(`no listing ${input.listingId}, use an id from search_events`);
     const { data, error } = await sb
       .from("saves")
       .insert({
         profile_id: input.profileId,
-        event_id: input.eventId,
-        url: event?.url ?? input.url ?? null,
-        title: event?.title ?? input.title ?? null,
+        listing_id: listing.id,
+        url: listing.url ?? input.url ?? null,
+        title: listing.title,
         note: input.note ?? null,
       })
-      .select("*, event:events(*)")
+      .select(SAVE_SELECT)
       .single();
 
     if (error) throw error;
@@ -71,8 +74,8 @@ export async function saveEvent(input: {
 }
 
 export function formatSave(save: SaveRow): string {
-  const event = save.event as EventRow | null | undefined;
-  const title = event?.title ?? save.title ?? save.url ?? "saved item";
-  const when = event?.starts_at ? ` · ${event.starts_at}` : "";
+  const listing = save.listing as ListingRow | null | undefined;
+  const title = listing?.title ?? save.title ?? save.url ?? "saved item";
+  const when = listing?.starts_at ? ` · ${listing.starts_at}` : "";
   return `${title}${when}`;
 }

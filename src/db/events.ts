@@ -1,8 +1,8 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jevNoulScores } from "../jev/client.ts";
+import { metroFor } from "../utils/metro.ts";
 import { listKeptListings } from "./listings.ts";
-import { getSupabase } from "./client.ts";
 import type { EventRow, TasteSignal } from "./types.ts";
 
 const EVENTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "events");
@@ -21,16 +21,6 @@ export type EventSearch = {
   limit?: number;
   taste?: TasteSignal[];
 };
-
-export async function listCatalogEvents(): Promise<EventRow[]> {
-  const { data, error } = await getSupabase()
-    .from("events")
-    .select("*")
-    .order("starts_at", { ascending: true });
-
-  if (error) throw error;
-  return (data ?? []) as EventRow[];
-}
 
 const MAX_RECS = 5;
 
@@ -54,53 +44,29 @@ function topPicks(events: EventRow[]): EventRow[] {
 
 const DEFAULT_WINDOW_MS = 21 * 24 * 60 * 60 * 1000;
 
-function withinWindow(events: EventRow[], input: EventSearch): EventRow[] {
-  const from = Date.parse(input.from ?? "") || Date.now();
-  const to = Date.parse(input.to ?? "") || Date.now() + DEFAULT_WINDOW_MS;
-  return events.filter((event) => {
-    const start = Date.parse(event.starts_at);
-    return Number.isNaN(start) || (start >= from && start <= to);
-  });
-}
-
-/** Rank ingested nights, then the test catalog, against the user's ask and taste. */
+/** Rank ingested nights in the user's metro against their ask and taste. No listings means no recs, never test data. */
 export async function searchEvents(input: EventSearch): Promise<EventRow[]> {
-  const ingested = withinWindow(await listKeptListings(input.city), input);
-  if (ingested.length > 0) {
-    let ordered = ingested;
-    try {
-      const ranked = await rankNights(ingested, input);
-      if (ranked.length > 0) ordered = ranked;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[jev] listing rank failed: ${msg}`);
-    }
-    const picks = topPicks(ordered);
-    console.log(`[search] listings ${picks.length}/${ingested.length} for ${input.city}`);
-    return picks;
+  const now = Date.now();
+  const from = new Date(Math.max(Date.parse(input.from ?? "") || now, now));
+  const to = new Date(Date.parse(input.to ?? "") || now + DEFAULT_WINDOW_MS);
+  const metro = metroFor(input.city);
+  const ingested = await listKeptListings(metro, from, to);
+  if (ingested.length === 0) {
+    console.log(`[search] no listings for ${metro} ${from.toISOString()}..${to.toISOString()}`);
+    return [];
   }
 
-  const catalog = await listCatalogEvents();
-  let ordered = catalog;
+  let ordered = ingested;
   try {
-    const ranked = await rankNights(catalog, input);
+    const ranked = await rankNights(ingested, input);
     if (ranked.length > 0) ordered = ranked;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[jev] rank failed: ${msg}`);
+    console.warn(`[jev] listing rank failed: ${msg}`);
   }
-  return topPicks(ordered);
-}
-
-export async function getEvent(id: string): Promise<EventRow | null> {
-  const { data, error } = await getSupabase()
-    .from("events")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
-
-  if (error) throw error;
-  return (data as EventRow | null) ?? null;
+  const picks = topPicks(ordered);
+  console.log(`[search] listings ${picks.length}/${ingested.length} for ${metro}`);
+  return picks;
 }
 
 /** Fallback only, used when Claude returns no text. Short on purpose. */
