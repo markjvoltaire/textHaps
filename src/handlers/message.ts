@@ -14,7 +14,7 @@ import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts
 
 const FALLBACK_REPLY = "ugh my bad, something glitched. try me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
-const BACKGROUND_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "hapsbackground.png");
+const BACKGROUND_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "haps-bg.jpg");
 
 /** Sets the Haps chat background once per person. A failure never blocks the reply. */
 async function ensureBackground(space: Space, profile: Profile): Promise<void> {
