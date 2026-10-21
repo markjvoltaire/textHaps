@@ -75,7 +75,7 @@ export function formatCatalogOverview(events: EventRow[]): string {
     const where = event.venue ? ` at ${event.venue}` : "";
     return `${event.title}${where}`;
   });
-  return `got a few for you: ${lines.join(", ")}. want me to dig into one?`;
+  return `got a few for you\n${lines.join(", ")}\nwant me to dig into one?`;
 }
 
 /** Flyers for the nights this reply actually searched. No search, no flyers. */

@@ -8,16 +8,19 @@ export function extractText(content: unknown): string {
   return "";
 }
 
-/** iMessage renders Markdown literally, so strip emphasis markers the model may emit. */
+/**
+ * iMessage renders Markdown literally, so strip what the model may emit, and hold
+ * the house style: no dashes, no bullets, no period at the end of a line.
+ */
 export function sanitizeOutgoingText(text: string): string {
   return text
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/\*([^*]+)\*/g, "$1")
     .replace(/\*/g, "")
     .replace(/`{1,3}/g, "")
-    .replace(/\s*[—–]\s*/g, ". ")
-    .replace(/[ \t]+\./g, ".")
-    .replace(/\.\s*\./g, ".")
+    .replace(/^[ \t]*(?:[-•]|\d+\.)[ \t]+/gm, "")
+    .replace(/[ \t]*[—–][ \t]*/g, ", ")
+    .replace(/(?<!\.)\.[ \t]*$/gm, "")
     .trim();
 }
 

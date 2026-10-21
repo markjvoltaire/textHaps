@@ -3,6 +3,7 @@ import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { handleMessage } from "./handlers/message.ts";
+import { startTracing } from "./observability.ts";
 import { formatError } from "./utils/text.ts";
 
 const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
@@ -19,6 +20,8 @@ for (const key of [
     throw new Error(`Missing ${key} in .env`);
   }
 }
+
+startTracing();
 
 const app = await Spectrum({
   projectId: process.env.PROJECT_ID!,
