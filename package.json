@@ -7,8 +7,9 @@
     "ingest": "tsx src/ingest/run.ts",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "dev:terminal": "SPECTRUM_PROVIDER=terminal tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "dev:terminal": "SPECTRUM_PROVIDER=terminal node --watch --import tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "watch": "tsx src/watch.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",

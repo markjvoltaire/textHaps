@@ -1,8 +1,12 @@
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { attachment, group, type Message, type Space } from "spectrum-ts";
+import { background } from "spectrum-ts/providers/imessage";
 import { generateReply } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
-import { upsertProfile } from "../db/profiles.ts";
+import { markBackgroundSet, upsertProfile } from "../db/profiles.ts";
+import type { Profile } from "../db/types.ts";
 import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, shouldWarn } from "./rateLimit.ts";
@@ -10,6 +14,19 @@ import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts
 
 const FALLBACK_REPLY = "ugh my bad, something glitched. try me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
+const BACKGROUND_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "hapsbackground.png");
+
+/** Sets the Haps chat background once per person. A failure never blocks the reply. */
+async function ensureBackground(space: Space, profile: Profile): Promise<void> {
+  if (profile.platform !== "imessage" || profile.background_set_at) return;
+  try {
+    await space.send(background(BACKGROUND_PATH));
+    await markBackgroundSet(profile.id);
+    console.log(`[background] set for sender=${profile.platform_user_id}`);
+  } catch (err) {
+    console.warn(`[background] failed for sender=${profile.platform_user_id}:`, formatError(err));
+  }
+}
 
 export async function handleMessage(space: Space, message: Message): Promise<void> {
   if (message.direction === "outbound") return;
@@ -44,6 +61,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       if (shouldWarn(profile.id, limit.window)) await space.send(RATE_LIMIT_REPLY);
       return;
     }
+    await ensureBackground(space, profile);
     const [taste, saves, history] = await Promise.all([
       listTaste(profile.id),
       listSaves(profile.id),
@@ -69,7 +87,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   // Only commit the exchange once the model actually produced something.
   // Keep only what the user actually sees: the lead plus up to 2 more bubbles.
   const sent = reply.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean).slice(0, 3);
-  await appendExchange(profileId, text, sent.join("\n\n")).catch((err: unknown) => {
+  await appendExchange(profileId, senderId, text, sent.join("\n\n")).catch((err: unknown) => {
     console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
   });
 

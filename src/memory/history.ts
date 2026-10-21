@@ -24,13 +24,18 @@ export async function getHistory(profileId: string): Promise<ChatTurn[]> {
 }
 
 /** Writes both sides of an exchange together, user turn first, so history never ends mid-pair. */
-export async function appendExchange(profileId: string, user: string, assistant: string): Promise<void> {
+export async function appendExchange(
+  profileId: string,
+  handle: string,
+  user: string,
+  assistant: string,
+): Promise<void> {
   const now = Date.now();
   const { error } = await getSupabase()
     .from("chat_turns")
     .insert([
-      { profile_id: profileId, role: "user", content: user, created_at: new Date(now).toISOString() },
-      { profile_id: profileId, role: "assistant", content: assistant, created_at: new Date(now + 1).toISOString() },
+      { profile_id: profileId, handle, role: "user", content: user, created_at: new Date(now).toISOString() },
+      { profile_id: profileId, handle, role: "assistant", content: assistant, created_at: new Date(now + 1).toISOString() },
     ]);
 
   if (error) throw error;
