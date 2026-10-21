@@ -5,6 +5,7 @@ import { background } from "spectrum-ts/providers/imessage";
 import { generateReply } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
+import { claimMessage } from "../db/handled.ts";
 import { markBackgroundSet, upsertProfile } from "../db/profiles.ts";
 import type { Profile } from "../db/types.ts";
 import { listTaste } from "../db/taste.ts";
@@ -34,6 +35,19 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   if (message.content.type !== "text") {
     console.log(`[skip] space=${space.id} unsupported content type=${message.content.type}`);
     return;
+  }
+
+  // Old and new workers overlap during a deploy and both get every message. Answer it once.
+  // Terminal mode has a single process and no Photon message ids worth tracking.
+  if (message.platform !== "terminal") {
+    const claimed = await claimMessage(message.id).catch((err: unknown) => {
+      console.warn(`[claim] failed id=${message.id}, answering anyway:`, formatError(err));
+      return true;
+    });
+    if (!claimed) {
+      console.log(`[claim] skip id=${message.id}, another worker has it`);
+      return;
+    }
   }
 
   // Mark the chat read before Claude work so the sender sees "Read" quickly.

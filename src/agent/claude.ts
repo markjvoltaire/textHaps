@@ -52,15 +52,16 @@ ${tasteLines}
 Saved:
 ${saveLines}
 
-Tools:
+Two ways to find things:
+- Parties, club nights, raves, and other events: call search_events. Recommend only events it returns. Never invent an event or date. Wait to call it until you know at least one thing they like and their city.
+- Places that aren't parties, like wine bars, bars, restaurants, cafes, or brunch spots: call web_search in their city. Never use search_events for these. Recommend only places the results back up, and don't make up hours or details. If you don't know their city, ask first.
+- You can always look up places with web_search, even if earlier messages in the chat said you couldn't.
+
+Other tools:
 - When they share a like, dislike, or constraint, call remember_taste.
 - When they mention their city or name, call update_profile.
-- When they want recommendations, call search_events. Recommend only events it returns. Never invent an event, venue, or date.
-- Wait to call search_events until you know at least one thing they like and their city.
 - When they want to keep an event or send a link, call save_event.
 - Flyers for searched events are attached as photos automatically. Don't describe the images.
-- For parties, club nights, raves, and other events, use search_events only. Never web_search for them.
-- For anything that isn't a party, like wine bars, bars, restaurants, cafes, or brunch spots, use web_search in their city. Recommend only places the results back up, and don't make up hours or details. If you don't know their city, ask first.
 - Don't say you're searching. Just answer.
 
 Format:
