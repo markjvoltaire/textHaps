@@ -17,6 +17,18 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 const MAX_TOOL_ROUNDS = 4;
 
+/** Anthropic-hosted web search for places (bars, restaurants). Parties stay on search_events. */
+function webSearchTool(profile: Profile): Anthropic.WebSearchTool20260209 {
+  return {
+    type: "web_search_20260209",
+    name: "web_search",
+    max_uses: 3,
+    ...(profile.city && {
+      user_location: { type: "approximate", city: profile.city, country: "US", timezone: "America/New_York" },
+    }),
+  };
+}
+
 function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[]): string {
   const tasteLines =
     taste.length === 0
@@ -47,17 +59,27 @@ Tools:
 - Wait to call search_events until you know at least one thing they like and their city.
 - When they want to keep an event or send a link, call save_event.
 - Flyers for searched events are attached as photos automatically. Don't describe the images.
+- For parties, club nights, raves, and other events, use search_events only. Never web_search for them.
+- For anything that isn't a party, like wine bars, bars, restaurants, cafes, or brunch spots, use web_search in their city. Recommend only places the results back up, and don't make up hours or details. If you don't know their city, ask first.
+- Don't say you're searching. Just answer.
 
 Format:
 - Plain text only. No Markdown.
 - A blank line starts a new text bubble. Use at most 3 bubbles.`;
 }
 
+/**
+ * The reply text. Web search answers come back split into many text blocks at
+ * citation boundaries, so only text after the last search result counts (that
+ * drops any "let me look" preamble) and the pieces are joined back together.
+ */
 function textFrom(content: Anthropic.ContentBlock[]): string {
+  const lastSearch = content.findLastIndex((block) => block.type === "web_search_tool_result");
   return content
+    .slice(lastSearch + 1)
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
     .map((block) => block.text)
-    .join("\n")
+    .join("")
     .trim();
 }
 
@@ -79,9 +101,19 @@ export async function generateReply(input: {
       model: MODEL,
       max_tokens: 1024,
       system: buildSystemPrompt(input.profile, input.taste, input.saves),
-      tools: HAPS_TOOLS,
+      tools: [...HAPS_TOOLS, webSearchTool(input.profile)],
       messages,
     });
+
+    for (const block of response.content) {
+      if (block.type === "server_tool_use") console.log(`[tool] ${block.name} ${JSON.stringify(block.input)}`);
+    }
+
+    // A long web search can pause mid-turn. Sending the turn back resumes it.
+    if (response.stop_reason === "pause_turn") {
+      messages.push({ role: "assistant", content: response.content });
+      continue;
+    }
 
     if (response.stop_reason !== "tool_use") {
       return {
