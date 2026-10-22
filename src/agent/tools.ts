@@ -4,8 +4,22 @@ import { applyProfileUpdate, updateProfile } from "../db/profiles.ts";
 import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
+import { searchWeb } from "../search/exa.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
+  {
+    name: "web_search",
+    description:
+      "Search the web for places that aren't parties: wine bars, bars, restaurants, cafes, brunch, run clubs. Never use it for parties or club nights. Recommend only places the results back up, and don't make up hours or details.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "What to look for, with the city and neighborhood, e.g. natural wine bar brooklyn" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
   {
     name: "search_events",
     description:
@@ -132,6 +146,12 @@ export async function runTool(
   session: ToolSession,
 ): Promise<unknown> {
   switch (name) {
+    case "web_search": {
+      const query = asString(input.query);
+      if (!query) return { error: "query is required" };
+      const results = await searchWeb(query);
+      return { count: results.length, results };
+    }
     case "search_events": {
       const taste = await listTaste(profile.id);
       if (!taste.some((signal) => signal.kind === "like")) {

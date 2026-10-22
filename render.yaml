@@ -26,6 +26,8 @@ services:
         sync: false
       - key: DEEPGRAM_API_KEY
         sync: false
+      - key: EXA_API_KEY
+        sync: false
   - type: cron
     name: texthaps-ingest
     runtime: node

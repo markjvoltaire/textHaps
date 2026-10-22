@@ -5,6 +5,7 @@ import { isOnboarded, nextOnboardingField } from "../db/profiles.ts";
 import type { EventRow, Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import { formatSave } from "../db/saves.ts";
+import { formatError } from "../utils/text.ts";
 import { HAPS_TOOLS, runTool, type ToolSession } from "./tools.ts";
 
 export type AgentReply = {
@@ -17,22 +18,6 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 const MAX_TOOL_ROUNDS = 4;
-
-/**
- * Anthropic-hosted web search for places (bars, restaurants). Parties stay on search_events.
- * The basic version on purpose: the 20260209 one filters results by running code first,
- * which made place replies take 16-18s instead of a few seconds.
- */
-function webSearchTool(profile: Profile): Anthropic.WebSearchTool20250305 {
-  return {
-    type: "web_search_20250305",
-    name: "web_search",
-    max_uses: 3,
-    ...(profile.city && {
-      user_location: { type: "approximate", city: profile.city, country: "US", timezone: "America/New_York" },
-    }),
-  };
-}
 
 function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[]): string {
   const tasteLines =
@@ -86,15 +71,8 @@ Never say:
 - anything that sounds like customer service or a press release`;
 }
 
-/**
- * The reply text. Web search answers come back split into many text blocks at
- * citation boundaries, so only text after the last search result counts (that
- * drops any "let me look" preamble) and the pieces are joined back together.
- */
 function textFrom(content: Anthropic.ContentBlock[]): string {
-  const lastSearch = content.findLastIndex((block) => block.type === "web_search_tool_result");
   return content
-    .slice(lastSearch + 1)
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("")
@@ -115,6 +93,10 @@ export async function generateReply(input: {
     { role: "user" as const, content: input.userMessage },
   ];
   const session: ToolSession = { searched: [] };
+  // Claude sometimes writes the answer in the same turn as a tool call (recs, then
+  // remember_taste), so keep text from every turn. Text next to a web_search is a
+  // "let me look" preamble the heads-up already covers, so that's dropped.
+  const written: string[] = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const system = buildSystemPrompt(input.profile, input.taste, input.saves);
@@ -130,13 +112,13 @@ export async function generateReply(input: {
         model: MODEL,
         max_tokens: 1024,
         system,
-        tools: [...HAPS_TOOLS, webSearchTool(input.profile)],
+        tools: HAPS_TOOLS,
         messages,
       });
       stream.on("streamEvent", (event) => {
         if (
           event.type === "content_block_start" &&
-          event.content_block.type === "server_tool_use" &&
+          event.content_block.type === "tool_use" &&
           event.content_block.name === "web_search"
         ) {
           input.onWebSearch?.();
@@ -151,23 +133,17 @@ export async function generateReply(input: {
       .update({
         output: response.content,
         usageDetails: { input: response.usage.input_tokens, output: response.usage.output_tokens },
-        metadata: { stop_reason: response.stop_reason, web_searches: response.usage.server_tool_use?.web_search_requests ?? 0 },
+        metadata: { stop_reason: response.stop_reason },
       })
       .end();
 
-    for (const block of response.content) {
-      if (block.type === "server_tool_use") console.log(`[tool] ${block.name} ${JSON.stringify(block.input)}`);
-    }
-
-    // A long web search can pause mid-turn. Sending the turn back resumes it.
-    if (response.stop_reason === "pause_turn") {
-      messages.push({ role: "assistant", content: response.content });
-      continue;
-    }
+    const searchedThisTurn = response.content.some((block) => block.type === "tool_use" && block.name === "web_search");
+    const text = textFrom(response.content);
+    if (text && (!searchedThisTurn || response.stop_reason !== "tool_use")) written.push(text);
 
     if (response.stop_reason !== "tool_use") {
       return {
-        text: textFrom(response.content),
+        text: written.join("\n"),
         imagePaths: eventFlyers(session.searched),
         events: session.searched,
       };
@@ -191,7 +167,7 @@ export async function generateReply(input: {
           content: JSON.stringify(result),
         });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = formatError(err);
         console.error(`[tool] ${block.name} failed:`, msg);
         tool.update({ level: "ERROR", statusMessage: msg }).end();
         toolResults.push({
@@ -207,7 +183,7 @@ export async function generateReply(input: {
   }
 
   return {
-    text: "",
+    text: written.join("\n"),
     imagePaths: eventFlyers(session.searched),
     events: session.searched,
   };
