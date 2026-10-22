@@ -18,10 +18,14 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 const MAX_TOOL_ROUNDS = 4;
 
-/** Anthropic-hosted web search for places (bars, restaurants). Parties stay on search_events. */
-function webSearchTool(profile: Profile): Anthropic.WebSearchTool20260209 {
+/**
+ * Anthropic-hosted web search for places (bars, restaurants). Parties stay on search_events.
+ * The basic version on purpose: the 20260209 one filters results by running code first,
+ * which made place replies take 16-18s instead of a few seconds.
+ */
+function webSearchTool(profile: Profile): Anthropic.WebSearchTool20250305 {
   return {
-    type: "web_search_20260209",
+    type: "web_search_20250305",
     name: "web_search",
     max_uses: 3,
     ...(profile.city && {
@@ -103,6 +107,8 @@ export async function generateReply(input: {
   saves: SaveRow[];
   history: ChatTurn[];
   userMessage: string;
+  /** Called when Claude starts a web search, before the results come back. */
+  onWebSearch?: () => void;
 }): Promise<AgentReply> {
   const messages: Anthropic.MessageParam[] = [
     ...input.history.map((turn) => ({ role: turn.role, content: turn.content })),
@@ -119,13 +125,24 @@ export async function generateReply(input: {
     );
     let response: Anthropic.Message;
     try {
-      response = await anthropic.messages.create({
+      // Streamed so a web search is spotted the moment it starts, not after it finishes.
+      const stream = anthropic.messages.stream({
         model: MODEL,
         max_tokens: 1024,
         system,
         tools: [...HAPS_TOOLS, webSearchTool(input.profile)],
         messages,
       });
+      stream.on("streamEvent", (event) => {
+        if (
+          event.type === "content_block_start" &&
+          event.content_block.type === "server_tool_use" &&
+          event.content_block.name === "web_search"
+        ) {
+          input.onWebSearch?.();
+        }
+      });
+      response = await stream.finalMessage();
     } catch (err) {
       generation.update({ level: "ERROR", statusMessage: err instanceof Error ? err.message : String(err) }).end();
       throw err;

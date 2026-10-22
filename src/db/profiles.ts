@@ -80,3 +80,12 @@ export async function markBackgroundSet(profileId: string): Promise<void> {
 
   if (error) throw error;
 }
+
+export async function markContactCardSent(profileId: string): Promise<void> {
+  const { error } = await getSupabase()
+    .from("profiles")
+    .update({ contact_card_sent_at: new Date().toISOString() })
+    .eq("id", profileId);
+
+  if (error) throw error;
+}

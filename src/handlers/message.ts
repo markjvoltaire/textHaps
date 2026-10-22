@@ -1,23 +1,38 @@
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
-import { attachment, group, type Message, type Space } from "spectrum-ts";
-import { background } from "spectrum-ts/providers/imessage";
+import { attachment, contact, group, type Message, type Space } from "spectrum-ts";
+import { background, nativeContactCard } from "spectrum-ts/providers/imessage";
 import { generateReply } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
-import { markBackgroundSet, upsertProfile } from "../db/profiles.ts";
+import { markBackgroundSet, markContactCardSent, upsertProfile } from "../db/profiles.ts";
 import type { Profile } from "../db/types.ts";
 import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, shouldWarn } from "./rateLimit.ts";
 import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
+import { transcribe } from "../voice/deepgram.ts";
 
 const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
-const BACKGROUND_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "haps-bg.jpg");
+const SEARCHING_REPLIES = ["let me check for you", "let me see what i find", "one sec, looking"];
+const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me instead?";
+
+type Audio = { mimeType: string; read: () => Promise<Buffer> };
+
+/** A voice note, or an audio file sent as an attachment. */
+function audioOf(content: Message["content"]): Audio | undefined {
+  if (content.type === "voice") return content;
+  if (content.type === "attachment" && content.mimeType.startsWith("audio/")) return content;
+  return undefined;
+}
+const ASSETS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "assets");
+const BACKGROUND_PATH = join(ASSETS_DIR, "haps-bg.jpg");
+const ICON_PATH = join(ASSETS_DIR, "haps-icon.jpg");
 
 /** Sets the Haps chat background once per person. A failure never blocks the reply. */
 async function ensureBackground(space: Space, profile: Profile): Promise<void> {
@@ -31,10 +46,37 @@ async function ensureBackground(space: Space, profile: Profile): Promise<void> {
   }
 }
 
+/**
+ * Once per person: shares Haps's iMessage name and photo (set on the Photon project
+ * profile), which shows "Maybe: Haps" and an Add banner, then sends a Haps contact
+ * card with the icon when HAPS_PHONE_NUMBER is set. A failure never blocks the reply.
+ */
+async function ensureContactCard(space: Space, profile: Profile): Promise<void> {
+  if (profile.platform !== "imessage" || profile.contact_card_sent_at) return;
+  try {
+    await space.send(nativeContactCard());
+    const phone = process.env.HAPS_PHONE_NUMBER;
+    if (phone) {
+      await space.send(
+        contact({
+          name: { first: "Haps" },
+          phones: [{ value: phone, type: "mobile" }],
+          photo: { mimeType: "image/jpeg", read: () => readFile(ICON_PATH) },
+        }),
+      );
+    }
+    await markContactCardSent(profile.id);
+    console.log(`[contact] shared with sender=${profile.platform_user_id} card=${Boolean(phone)}`);
+  } catch (err) {
+    console.warn(`[contact] failed for sender=${profile.platform_user_id}:`, formatError(err));
+  }
+}
+
 export async function handleMessage(space: Space, message: Message): Promise<void> {
   if (message.direction === "outbound") return;
   if (message.content.type === "read") return;
-  if (message.content.type !== "text") {
+  const audio = audioOf(message.content);
+  if (message.content.type !== "text" && !audio) {
     console.log(`[skip] space=${space.id} unsupported content type=${message.content.type}`);
     return;
   }
@@ -59,7 +101,20 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   });
 
   const senderId = message.sender?.id ?? space.id;
-  const text = extractText(message.content).trim();
+  let text = extractText(message.content).trim();
+  // Voice notes become text first, then go through the same flow as a typed message.
+  if (audio) {
+    try {
+      text = await transcribe(await audio.read(), audio.mimeType);
+      console.log(`[voice] sender=${senderId} mime=${audio.mimeType} transcript=${JSON.stringify(text)}`);
+    } catch (err) {
+      console.warn(`[voice] transcription failed for sender=${senderId}:`, formatError(err));
+    }
+    if (!text) {
+      await space.send(VOICE_FALLBACK_REPLY);
+      return;
+    }
+  }
   if (!text) return;
 
   console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}`);
@@ -67,13 +122,24 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   // One Langfuse trace per reply: the text in, what was actually sent out, and the
   // Claude calls and tools in between (no-op when Langfuse keys aren't set).
   await startActiveObservation("imessage-reply", async (span) => {
-    span.update({ input: text });
+    span.update({ input: text, metadata: { voice: Boolean(audio) } });
     const platform = message.platform || "imessage";
+    let profile: Profile;
     let profileId: string;
     let reply: string;
     let imagePaths: string[] = [];
+    // Web searches take a few seconds, so text a quick heads-up once and keep the typing dots going.
+    let searchingNotice: Promise<void> | undefined;
+    const onWebSearch = () => {
+      if (searchingNotice) return;
+      const notice = SEARCHING_REPLIES[Math.floor(Math.random() * SEARCHING_REPLIES.length)]!;
+      searchingNotice = space
+        .send(notice)
+        .then(() => space.startTyping())
+        .catch((err: unknown) => console.warn(`[searching] notice failed for sender=${senderId}:`, formatError(err)));
+    };
     try {
-      const profile = await upsertProfile(platform, senderId);
+      profile = await upsertProfile(platform, senderId);
       profileId = profile.id;
       const limit = await checkRateLimit(profile.id);
       if (!limit.ok) {
@@ -88,8 +154,10 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         getHistory(profile.id),
       ]);
       const generated = await propagateAttributes({ userId: profile.id, sessionId: profile.id }, () =>
-        generateReply({ profile, taste, saves, history, userMessage: text }),
+        generateReply({ profile, taste, saves, history, userMessage: text, onWebSearch }),
       );
+      // The heads-up must land before the answer.
+      await searchingNotice;
       imagePaths = generated.imagePaths;
       reply = sanitizeOutgoingText(generated.text);
       if (!reply && imagePaths.length > 0) {
@@ -132,6 +200,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       await new Promise((resolve) => setTimeout(resolve, 900));
       await space.send(bubble);
     }
+    // After the first reply, not before it, so the chat opens with Haps talking.
+    await ensureContactCard(space, profile);
   });
   await flushTracing();
 }

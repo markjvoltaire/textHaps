@@ -22,6 +22,10 @@ services:
         sync: false
       - key: TYPESAFE_API_KEY
         sync: false
+      - key: HAPS_PHONE_NUMBER
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
   - type: cron
     name: texthaps-ingest
     runtime: node
