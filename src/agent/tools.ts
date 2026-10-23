@@ -5,6 +5,7 @@ import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
 import { searchWeb } from "../search/exa.ts";
+import { eventLinksIn, readEventPage } from "./eventLink.ts";
 import { hasLink, isExactLink, LINK } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
@@ -18,6 +19,19 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         query: { type: "string", description: "What to look for, with the city and neighborhood, e.g. natural wine bar brooklyn" },
       },
       required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_event_link",
+    description:
+      "Read an event page the user just sent (Posh, Partiful, Eventbrite, DICE, RA, Instagram, etc.) and get its title, time, and place. Only works on a link in their current message. If it comes back unreadable, ask them for the day, time, and place.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The event link, exactly as the user sent it" },
+      },
+      required: ["url"],
       additionalProperties: false,
     },
   },
@@ -145,6 +159,8 @@ export type ToolSession = {
   savedUrls: Set<string>;
   /** The user's own text this reply (chat plus current message), the only other source of links. */
   userText: string;
+  /** Just the message being answered, the only place read_event_link accepts a link from. */
+  userMessage: string;
   /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
   storedText: string;
   /** Untrusted content (search results, scraped listings) was seen this reply, so links get filtered. Images set it too. */
@@ -173,6 +189,34 @@ export async function runTool(
       for (const result of results) session.webUrls.add(result.url);
       // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.
       return { count: results.length, untrusted_web_content: results };
+    }
+    case "read_event_link": {
+      const url = asString(input.url);
+      if (!url) return { error: "url is required" };
+      // Only links the user sent right now, so a link from a page or old chat can't make Haps fetch it.
+      const allowed = eventLinksIn(session.userMessage);
+      if (!isExactLink(url, allowed)) {
+        return { error: "url_not_in_message", hint: "Only read a link the user sent in their latest message." };
+      }
+      // The page is read as untrusted text; its fields never join webUrls or savedUrls.
+      session.untrusted = true;
+      const event = await readEventPage(url);
+      if (!event) {
+        return { error: "unreadable", hint: "Ask them for the day, time, and place." };
+      }
+      return {
+        untrusted_page_content: {
+          title: event.title,
+          when: event.starts_at ? friendlyWhen(event.starts_at) : null,
+          starts_at: event.starts_at,
+          ends_at: event.ends_at,
+          venue: event.venue,
+          address: event.address,
+          city: event.city,
+          price_note: event.price_note,
+        },
+        hint: "Offer to save it with save_event, using the url they sent.",
+      };
     }
     case "search_events": {
       // Titles and venues are scraped from organizers, so they can carry links too.
