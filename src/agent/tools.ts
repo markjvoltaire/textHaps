@@ -5,6 +5,7 @@ import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
 import { searchWeb } from "../search/exa.ts";
+import { isExactLink, LINK } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
@@ -140,7 +141,11 @@ export type ToolSession = {
   webSearches: number;
   /** Links web_search returned, the only page links a reply may pass on. */
   webUrls: Set<string>;
-  /** Untrusted content was seen this reply, so links get filtered. Images set it too. */
+  /** Urls from the user's saves: exact matches only, not whole hosts. */
+  savedUrls: Set<string>;
+  /** The user's own text this reply (chat plus current message), the only other source of links. */
+  userText: string;
+  /** Untrusted content (search results, scraped listings) was seen this reply, so links get filtered. Images set it too. */
   untrusted: boolean;
 };
 
@@ -168,6 +173,8 @@ export async function runTool(
       return { count: results.length, untrusted_web_content: results };
     }
     case "search_events": {
+      // Titles and venues are scraped from organizers, so they can carry links too.
+      session.untrusted = true;
       const taste = await listTaste(profile.id);
       if (!taste.some((signal) => signal.kind === "like")) {
         return {
@@ -214,6 +221,15 @@ export async function runTool(
       return { saved: signal };
     }
     case "save_event": {
+      // Saved urls come back in later replies as trusted, so a planted one can't be saved.
+      const url = asString(input.url);
+      if (
+        session.untrusted &&
+        url &&
+        !isExactLink(url, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])
+      ) {
+        return { error: "url_not_from_user_or_search", hint: "Only save links the user sent or a search returned." };
+      }
       const saved = await saveEvent({
         profileId: profile.id,
         listingId: asString(input.event_id),
@@ -225,6 +241,9 @@ export async function runTool(
     }
     case "list_saves": {
       const saves = await listSaves(profile.id);
+      // Saved listings are scraped, but a user asking for their saved link should get it.
+      session.untrusted = true;
+      for (const save of saves) for (const url of [save.url, save.listing?.url]) if (url) session.savedUrls.add(url);
       return { count: saves.length, saves };
     }
     case "update_profile": {

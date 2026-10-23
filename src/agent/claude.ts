@@ -6,6 +6,7 @@ import type { EventRow, Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import { formatSave } from "../db/saves.ts";
 import { formatError } from "../utils/text.ts";
+import { stripUnknownLinks } from "./links.ts";
 import { HAPS_TOOLS, runTool, type ToolSession } from "./tools.ts";
 
 export type AgentReply = {
@@ -73,6 +74,8 @@ Never say:
 - anything that sounds like customer service or a press release`;
 }
 
+const isLookup = (name: string) => name === "web_search" || name === "search_events" || name === "list_saves";
+
 function textFrom(content: Anthropic.ContentBlock[]): string {
   return content
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
@@ -90,11 +93,14 @@ export async function generateReply(input: {
   /** Called when Claude starts a web search, before the results come back. */
   onWebSearch?: () => void;
 }): Promise<AgentReply> {
+  // What the user wrote plus Haps's own earlier replies (filtered when sent). Tool results
+  // and the system prompt can echo planted text, so they never count as known.
+  const userText = [...input.history.map((turn) => turn.content), input.userMessage].join("\n");
   const messages: Anthropic.MessageParam[] = [
     ...input.history.map((turn) => ({ role: turn.role, content: turn.content })),
     { role: "user" as const, content: input.userMessage },
   ];
-  const session: ToolSession = { searched: [], webSearches: 0, webUrls: new Set(), untrusted: false };
+  const session: ToolSession = { searched: [], webSearches: 0, webUrls: new Set(), savedUrls: new Set(), untrusted: false, userText };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then
   // remember_taste), so that text is kept too. finish() decides how it joins the final turn.
   const written: string[] = [];
@@ -141,22 +147,24 @@ export async function generateReply(input: {
       })
       .end();
 
-    // Text next to a search is "let me look" narration. Text next to remember_taste or
-    // save_event is usually the answer itself, so it's kept.
-    const narration = response.content.some(
-      (block) => block.type === "tool_use" && (block.name === "web_search" || block.name === "search_events" || block.name === "list_saves"),
-    );
+    // Text next to a lookup is "let me look" narration. Text next to remember_taste or
+    // save_event is usually the answer itself, so it's kept, even beside a lookup.
+    const toolNames = response.content.flatMap((block) => (block.type === "tool_use" ? [block.name] : []));
+    const narration = toolNames.length > 0 && toolNames.every(isLookup);
     const text = textFrom(response.content);
 
     if (response.stop_reason !== "tool_use") {
-      // A final turn with its own list of lines is the whole answer. A short one (an ack)
-      // goes after what was written earlier, so earlier lines can't push recs out of the
-      // handler's 3 bubbles and recs restated in the final turn aren't sent twice.
-      const finalLines = text.split("\n").filter((line) => line.trim()).length;
-      const parts = finalLines >= 2 ? [text] : [...written, text];
-      return finish(parts, session, knownText(system, messages));
+      // A final turn that lists several lines and repeats something already written is the
+      // whole answer, so earlier lines can't push it out of the handler's 3 bubbles. Any
+      // other final turn (an ack, or new lines) goes after what was written.
+      const earlier = new Set(written.flatMap(lines));
+      const restates = lines(text).length >= 2 && lines(text).some((line) => earlier.has(line));
+      return finish(restates ? [text] : [...written, text], session);
     }
 
+    // A lookup means the real answer comes after it, so chatter written before it ("bet,
+    // brooklyn it is") is dropped rather than pushing the recs out of the 3 bubbles.
+    if (toolNames.some(isLookup)) written.length = 0;
     if (text && !narration) written.push(text);
     messages.push({ role: "assistant", content: response.content });
 
@@ -189,84 +197,29 @@ export async function generateReply(input: {
     messages.push({ role: "user", content: toolResults });
   }
 
-  return finish(written, session, knownText("", messages));
+  return finish(written, session);
 }
 
-function finish(parts: string[], session: ToolSession, known: string): AgentReply {
+/** Trimmed, lowercased, non-empty lines, for comparing repeats. */
+function lines(text: string): string[] {
+  return text.split("\n").map((line) => line.trim().toLowerCase()).filter(Boolean);
+}
+
+function finish(parts: string[], session: ToolSession): AgentReply {
+  // A later part drops lines an earlier part already sent. Repeats inside one part stay.
   const seen = new Set<string>();
   const text = parts
-    .flatMap((part) => part.split("\n"))
-    .filter((line) => {
-      const key = line.trim().toLowerCase();
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    .map((part) => {
+      const kept = part.split("\n").filter((line) => line.trim() && !seen.has(line.trim().toLowerCase()));
+      for (const line of lines(part)) seen.add(line);
+      return kept.join("\n");
     })
+    .filter(Boolean)
     .join("\n");
   return {
     // Images count as untrusted too (set where they're read), since text inside them can plant links.
-    text: session.untrusted ? stripUnknownLinks(text, session.webUrls, known) : text,
+    text: session.untrusted ? stripUnknownLinks(text, session.webUrls, session.savedUrls, session.userText) : text,
     imagePaths: eventFlyers(session.searched),
     events: session.searched,
   };
-}
-
-/** Everything Claude saw that didn't come from a web page: the prompt, the chat, and Haps's own tool results. */
-function knownText(system: string, messages: Anthropic.MessageParam[]): string {
-  const parts = [system];
-  for (const message of messages) {
-    if (typeof message.content === "string") {
-      parts.push(message.content);
-      continue;
-    }
-    // Claude's own turns in this reply could repeat a planted link, so they don't count.
-    if (message.role !== "user") continue;
-    for (const block of message.content) {
-      if (block.type === "text") parts.push(block.text);
-      // web_search results are left out: their links are only trusted by exact match below.
-      if (block.type === "tool_result" && typeof block.content === "string" && !block.content.includes('"untrusted_web_content"')) {
-        parts.push(block.content);
-      }
-    }
-  }
-  return parts.join("\n");
-}
-
-const LINK = /\bhttps?:\/\/[^\s<>"]+|\bwww\.[^\s<>"]+/gi;
-
-function normalizeLink(link: string): string {
-  return link.replace(/[).,!?;:'"]+$/, "").replace(/\/+$/, "").replace(/^https?:\/\//i, "").toLowerCase();
-}
-
-/** Lowercased host without a leading "www.", or undefined if the link doesn't parse. */
-function linkHost(link: string): string | undefined {
-  const clean = link.replace(/[).,!?;:'"]+$/, "");
-  try {
-    return new URL(/^https?:\/\//i.test(clean) ? clean : `https://${clean}`).hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * A planted page can tell Claude to send the user a link. Links only go out when they
- * came back from a search or were already in the chat, so a page can't add its own.
- * Claude often shortens a result to its homepage, so a link on the same host also passes.
- */
-function stripUnknownLinks(text: string, searched: Set<string>, known: string): string {
-  const knownLinks = known.match(LINK) ?? [];
-  const trusted = [...searched, ...knownLinks];
-  const allowed = new Set(trusted.map(normalizeLink));
-  const hosts = new Set(trusted.map(linkHost).filter((host): host is string => !!host));
-  return text
-    .replace(LINK, (link) => {
-      const host = linkHost(link);
-      if (allowed.has(normalizeLink(link)) || (host && hosts.has(host))) return link;
-      console.warn(`[links] dropped link not from search results: ${link}`);
-      return "";
-    })
-    .replace(/[ \t]{2,}/g, " ")
-    .split("\n")
-    .map((line) => line.trim())
-    .join("\n");
 }
