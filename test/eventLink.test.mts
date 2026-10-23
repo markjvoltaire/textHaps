@@ -430,4 +430,67 @@ await test("generateReply: read_event_link narration is dropped, answer kept, pl
   assert.match(reply.text, /want me to save it\?/);
 });
 
+await test("posh.vip titles: title and venue come from the page title, not Haiku", async () => {
+  const cases: [string, string, string | null][] = [
+    ["The Trip Miami | Nova Social Club | Sat, Nov 7, 2026 | The Trip", "The Trip Miami", "The Trip"],
+    ["SLUTTY SUNDAY | LUXMIAMI | Sun, Oct 25, 2026 | TUCANDELA WYNWOOD", "SLUTTY SUNDAY", "TUCANDELA WYNWOOD"],
+    ["LA FACTORIA REGGAETON OLD SCHOOL at Candela  | CANDELA BAR BRICKELL | Sun, Oct 25, 2026 | CANDELA BAR BRICKELL 📍", "LA FACTORIA REGGAETON OLD SCHOOL at Candela", "CANDELA BAR BRICKELL"],
+    // No venue part: the title still comes from the page, the venue stays Haiku's.
+    ["Palm Tree Club Miami | Lifted Events LLC | Sat, Oct 24, 2026", "Palm Tree Club Miami", "Haiku Venue"],
+  ];
+  for (const [pageTitle, title, venue] of cases) {
+    exa = () => json({ results: [{ url: URL1, title: pageTitle, text: PAGE }] });
+    haiku = () => message({ ...EVENT, title: "Haiku Title", venue: "Haiku Venue" });
+    const r: any = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+    assert.equal(r.untrusted_page_content.title, title, pageTitle);
+    assert.equal(r.untrusted_page_content.venue, venue, pageTitle);
+    // time still comes from Haiku
+    assert.equal(r.untrusted_page_content.when, "Sat Nov 7 8pm");
+  }
+  // Other hosts and unrecognized shapes are left to Haiku.
+  const other = "https://dice.fm/event/x";
+  exa = () => json({ results: [{ url: other, title: "A | B | Sat, Nov 7, 2026 | C", text: PAGE }] });
+  haiku = () => message({ ...EVENT, title: "Haiku Title", venue: "Haiku Venue" });
+  let r: any = await runTool(profile, "read_event_link", { url: other }, session(other));
+  assert.equal(r.untrusted_page_content.venue, "Haiku Venue");
+  exa = () => json({ results: [{ url: URL1, title: "Just A | Title | Here | Now", text: PAGE }] });
+  r = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+  assert.equal(r.untrusted_page_content.venue, "Haiku Venue");
+  // A planted link in a title part is stripped like any other field.
+  exa = () => json({ results: [{ url: URL1, title: "Party https://evil.example/x | H | Sat, Nov 7, 2026 | Club //evil.com/y", text: PAGE }] });
+  r = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+  assert.doesNotMatch(JSON.stringify(r), /evil/);
+});
+
+await test("price_note keeps stated prices, drops commentary; age has its own field", async () => {
+  const read = async (fields: Record<string, unknown>): Promise<any> => {
+    haiku = () => message({ ...EVENT, ...fields });
+    return (await runTool(profile, "read_event_link", { url: URL1 }, session(URL1))).untrusted_page_content;
+  };
+  for (const note of ["$20", "free with RSVP", "from $15"]) assert.equal((await read({ price_note: note })).price_note, note);
+  for (const note of [
+    "Age restrictions: GA 18+ | VIP 21+. Sunday pass; price not stated on page.",
+    "Price not listed",
+    "unknown",
+    "N/A",
+    "No price shown",
+    "not available",
+  ]) {
+    assert.equal((await read({ price_note: note })).price_note, null, note);
+  }
+  const page = await read({ price_note: null, age: "21+" });
+  assert.equal(page.age, "21+");
+  assert.equal((await read({ age: `18+ ${"x".repeat(500)}` })).age.length, 200);
+  assert.equal((await read({})).age, null);
+  // The prompt and schema carry the new rules.
+  haiku = (_u, init) => {
+    const body = JSON.parse(String(init.body));
+    assert.match(body.system, /never describe what is missing/);
+    assert.match(body.system, /Event \| Host \| Date \| Venue/);
+    assert.ok("age" in body.output_config.format.schema.properties);
+    return message(EVENT);
+  };
+  await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+});
+
 console.log(`${passed} passed`);

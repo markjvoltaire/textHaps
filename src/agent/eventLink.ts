@@ -20,9 +20,10 @@ export type EventDetails = {
   address: string | null;
   city: string | null;
   price_note: string | null;
+  age: string | null;
 };
 
-const FIELDS = ["title", "starts_at", "ends_at", "venue", "address", "city", "price_note"] as const;
+const FIELDS = ["title", "starts_at", "ends_at", "venue", "address", "city", "price_note", "age"] as const;
 
 const SCHEMA = {
   type: "object",
@@ -38,7 +39,7 @@ const systemPrompt = (today: string) => `You pull event details out of a web pag
 
 Today's date is ${today}. If the page gives no year, use the next upcoming date, never a past year.
 
-Set is_event to false if the page isn't about a specific event, or is a login wall or error page. Use null for anything the page doesn't say; never guess. starts_at and ends_at are ISO 8601 date-times in the venue's local time with that place's UTC offset, like 2026-11-07T20:00:00-05:00. If the page gives a date but no time, starts_at is just the date, like 2026-11-07. Use null if the date isn't clear. Keep each field short and plain text with no links.`;
+Set is_event to false if the page isn't about a specific event, or is a login wall or error page. Use null for anything the page doesn't say; never guess. starts_at and ends_at are ISO 8601 date-times in the venue's local time with that place's UTC offset, like 2026-11-07T20:00:00-05:00. If the page gives a date but no time, starts_at is just the date, like 2026-11-07. Use null if the date isn't clear. price_note is only the price as the page states it, like "$20", "free with RSVP", or "from $15". Use null when no price is stated; never describe what is missing or add your own notes. age is the age limit as the page states it, like "21+" or "18+", or null. Page titles on posh.vip look like "Event | Host | Date | Venue": the host is who throws it, not the venue, and the last part is the venue. Keep each field short and plain text with no links.`;
 
 /** The http(s) links the user sent in this message, as written minus trailing punctuation, capped. Links from earlier chat don't count. */
 export function eventLinksIn(message: string): string[] {
@@ -120,8 +121,31 @@ export function describeWhen(startsAt: string, endsAt: string | null, now = Date
   return { when: `${date} ${time}`, timeKnown: true, past: Math.max(end, start + 6 * 3600_000) < now };
 }
 
+/** Haiku sometimes explains what the page lacks instead of leaving the price empty. */
+const PRICE_COMMENTARY = /not (stated|listed|shown|available|provided)|unknown|n\/a|no price/i;
+
+const POSH_DATE = /^(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s+[a-z]{3,9}\.?\s+\d{1,2}\b/i;
+
+/**
+ * Posh titles read "Event | Host | Date | Venue", and Haiku tends to take the host for the venue.
+ * Parsed only when a date part is found, so a title in some other shape is left to Haiku.
+ */
+export function parsePoshTitle(url: string, pageTitle: string): { title: string; venue: string | null } | null {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+  if (host !== "posh.vip") return null;
+  const parts = pageTitle.split("|").map((part) => part.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "").trim());
+  if (parts.length < 3 || !parts[0] || !parts.some((part, index) => index > 0 && POSH_DATE.test(part))) return null;
+  const last = parts[parts.length - 1]!;
+  return { title: parts[0], venue: parts.length >= 4 && last && !POSH_DATE.test(last) ? last : null };
+}
+
 /** Haiku's read of the page, or null when the page isn't an event. */
-export async function extractEvent(pageTitle: string, pageText: string): Promise<EventDetails | null> {
+export async function extractEvent(pageTitle: string, pageText: string, url = ""): Promise<EventDetails | null> {
   const system = systemPrompt(new Date().toISOString().slice(0, 10));
   const input = `Page title: ${pageTitle}\n\nPage text:\n${pageText}`;
   const generation = startObservation(
@@ -153,14 +177,17 @@ export async function extractEvent(pageTitle: string, pageText: string): Promise
     const block = response.content.find((item): item is Anthropic.TextBlock => item.type === "text");
     const parsed = JSON.parse(block?.text ?? "{}") as Record<string, unknown>;
     if (parsed.is_event !== true) return null;
+    const posh = parsePoshTitle(url, pageTitle);
+    const price = cleanField(parsed.price_note);
     return {
-      title: cleanField(parsed.title),
+      title: cleanField(posh?.title) ?? cleanField(parsed.title),
       starts_at: cleanStart(parsed.starts_at),
       ends_at: cleanEnd(parsed.ends_at),
-      venue: cleanField(parsed.venue),
+      venue: cleanField(posh?.venue) ?? cleanField(parsed.venue),
       address: cleanField(parsed.address),
       city: cleanField(parsed.city),
-      price_note: cleanField(parsed.price_note),
+      price_note: price && !PRICE_COMMENTARY.test(price) ? price : null,
+      age: cleanField(parsed.age),
     };
   } catch (err) {
     generation.update({ level: "ERROR", statusMessage: formatError(err) }).end();
@@ -174,7 +201,7 @@ export async function readEventPage(url: string): Promise<EventDetails | null> {
     const [page] = await fetchPages([url]);
     // Login walls (Instagram often) come back near-empty.
     if (!page || page.text.length < 40) return null;
-    const event = await extractEvent(page.title, page.text);
+    const event = await extractEvent(page.title, page.text, url);
     return event?.starts_at ? event : null;
   } catch (err) {
     console.warn(`[event-link] could not read ${url}: ${formatError(err)}`);

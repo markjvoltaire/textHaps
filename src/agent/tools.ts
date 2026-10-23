@@ -248,9 +248,10 @@ export async function runTool(
           venue: event.venue,
           address: event.address,
           price_note: event.price_note,
+          age: event.age,
         },
         hint: when.timeKnown
-          ? "Offer to save it with save_event, using the url they sent."
+          ? "Offer to save it with save_event, using the url they sent. Mention the age limit if there is one."
           : "The page had no start time. Ask what time it starts, and offer to save it with save_event using the url they sent.",
       };
     }
