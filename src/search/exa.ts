@@ -31,7 +31,7 @@ export async function searchWeb(query: string): Promise<WebResult[]> {
       userLocation: "US",
       contents: { highlights: true },
     }),
-    // The user is already waiting after "let me check", so give up rather than hang.
+    // The user is already waiting on the typing dots, so give up rather than hang.
     signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) {

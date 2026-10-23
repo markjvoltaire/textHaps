@@ -19,7 +19,6 @@ import { transcribe } from "../voice/deepgram.ts";
 
 const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
-const SEARCHING_REPLIES = ["let me check for you", "let me see what i find", "one sec, looking"];
 const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me instead?";
 // A few minutes of voice note is well under this.
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
@@ -163,15 +162,13 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     span.update({ input: text, metadata: { voice: Boolean(audio) } });
     let reply: string;
     let imagePaths: string[] = [];
-    // Web searches take a few seconds, so text a quick heads-up once and keep the typing dots going.
+    // Web searches take a few seconds, so keep the typing dots going instead of texting a heads-up.
     let searchingNotice: Promise<void> | undefined;
     const onWebSearch = () => {
       if (searchingNotice) return;
-      const notice = SEARCHING_REPLIES[Math.floor(Math.random() * SEARCHING_REPLIES.length)]!;
       searchingNotice = space
-        .send(notice)
-        .then(() => space.startTyping())
-        .catch((err: unknown) => console.warn(`[searching] notice failed for sender=${senderId}:`, formatError(err)));
+        .startTyping()
+        .catch((err: unknown) => console.warn(`[searching] typing failed for sender=${senderId}:`, formatError(err)));
     };
     try {
       await ensureBackground(space, profile);
@@ -183,7 +180,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       const generated = await propagateAttributes({ userId: profile.id, sessionId: profile.id }, () =>
         generateReply({ profile, taste, saves, history, userMessage: text, onWebSearch }),
       );
-      // The heads-up must land before the answer.
+      // Typing must start before the answer lands, or the dots can linger after it.
       await searchingNotice;
       imagePaths = generated.imagePaths;
       reply = sanitizeOutgoingText(generated.text);
@@ -193,7 +190,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     } catch (err) {
       console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
       span.update({ level: "ERROR", statusMessage: formatError(err) });
-      // Let a pending heads-up land first so the glitch message doesn't arrive before it.
+      // Let typing start first so the dots don't linger after the glitch message.
       await searchingNotice;
       await space.send(FALLBACK_REPLY);
       return;
@@ -201,7 +198,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
     if (!reply) {
       console.warn(`[claude] empty reply for sender=${senderId}`);
-      // They were told "let me check", so don't leave them hanging.
+      // They watched the typing dots through a search, so don't leave them hanging.
       if (searchingNotice) await space.send(FALLBACK_REPLY);
       return;
     }
