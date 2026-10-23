@@ -9,15 +9,28 @@ const TLDS =
 const NOT_TLD = "js|jk|ts|py|md|txt|png|jpg|jpeg|gif|pdf|html|css|json|heic|mov|mp4|mp3";
 
 export const LINK = new RegExp(
-  `\\bhttps?://[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|` +
-    `(?<![\\w@./-])(?:(?:[a-z0-9-]+\\.)+(?:${TLDS})|(?:[a-z0-9-]+\\.)*[a-z0-9-]{3,}\\.(?:co\\.|com\\.)?(?!(?:${NOT_TLD})\\b)[a-z]{2,24})` +
+  `\\b[a-z][\\w+.-]*://[^\\s<>"]+|(?<![\\w:])//[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|` +
+    // A path makes any short name a link ("ev.top/x"); without one, only the endings below count.
+    `(?<![\\w-])(?:[a-z0-9-]+\\.)+(?!(?:${NOT_TLD})\\b)[a-z]{2,24}/[^\\s<>"]*|` +
+    `(?<![\\w-])(?:(?:[a-z0-9-]+\\.)+(?:${TLDS})|(?:[a-z0-9-]+\\.)*[a-z0-9-]{3,}\\.(?:co\\.|com\\.)?(?!(?:${NOT_TLD})\\b)[a-z]{2,24})` +
     `(?![\\w-]|\\.\\w)(?:/[^\\s<>"]*)?`,
   "gi",
 );
 
 /** A scheme, www. or path link, as opposed to a bare name like "lofi.fm". */
 function isFullLink(link: string): boolean {
-  return /^(https?:|www\.)/i.test(link) || link.includes("/");
+  return /^([a-z][\w+.-]*:|www\.)/i.test(link) || link.includes("/");
+}
+
+/** Removes every link from `text`. Repeats because cutting one out can join the pieces around it into a new one. */
+export function stripLinks(text: string): string {
+  let current = text;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const next = current.replace(LINK, "");
+    if (next === current) break;
+    current = next;
+  }
+  return current;
 }
 
 /** Whether `text` has a link; with `fullOnly`, bare names like "lofi.fm" don't count. */
@@ -72,13 +85,21 @@ export function isExactLink(link: string, urls: Iterable<string>): boolean {
 export function stripUnknownLinks(text: string, searched: Set<string>, saved: Set<string>, known: string): string {
   const exact = new Set([...searched, ...saved, ...(known.match(LINK) ?? [])].map(normalizeLink));
   const hosts = new Set([...searched].map(linkHost).filter((host): host is string => !!host));
-  return text
-    .replace(LINK, (link) => {
+  const filter = (input: string) =>
+    input.replace(LINK, (link) => {
       const host = linkHost(link);
       if (exact.has(normalizeLink(link)) || (host && hosts.has(host) && isHomepage(link))) return link;
       console.warn(`[links] dropped link not from search results: ${link}`);
       return "";
-    })
+    });
+  // Dropping a link can join its neighbors into a new one ("evil.https://a.com"), so go again until nothing changes.
+  let cleaned = text;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const next = filter(cleaned);
+    if (next === cleaned) break;
+    cleaned = next;
+  }
+  return cleaned
     .replace(/[ \t]{2,}/g, " ")
     .split("\n")
     .map((line) => line.trim())

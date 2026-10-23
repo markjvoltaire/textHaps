@@ -21,9 +21,9 @@ globalThis.fetch = (async (input: any, init: RequestInit = {}) => {
   throw new Error(`unexpected network call to ${url}`);
 }) as typeof fetch;
 
-const { eventLinksIn, extractEvent } = await import("../src/agent/eventLink.ts");
+const { eventLinksIn, extractEvent, describeWhen } = await import("../src/agent/eventLink.ts");
 const { runTool } = await import("../src/agent/tools.ts");
-const { stripUnknownLinks } = await import("../src/agent/links.ts");
+const { stripUnknownLinks, stripLinks, hasLink } = await import("../src/agent/links.ts");
 const { fetchPages } = await import("../src/search/exa.ts");
 
 const profile: any = { id: "p1", city: "NYC", name: null };
@@ -34,6 +34,7 @@ const session = (userMessage: string, history = "") => ({
   savedUrls: new Set<string>(),
   userText: `${history}\n${userMessage}`,
   userMessage,
+  eventReads: new Map<string, Promise<any>>(),
   storedText: "",
   untrusted: false,
 });
@@ -105,13 +106,16 @@ await test("success: Exa request shape, Haiku request shape, untrusted result, f
   const result: any = await runTool(profile, "read_event_link", { url: URL1 }, s);
   assert.equal(result.error, undefined);
   assert.equal(result.untrusted_page_content.title, "Rooftop Sunset Party");
-  assert.match(result.untrusted_page_content.when, /Sat/);
+  assert.equal(result.untrusted_page_content.when, "Sat Nov 7 8pm");
+  assert.equal(result.untrusted_page_content.city, undefined);
   assert.equal(s.untrusted, true);
   assert.equal(s.webUrls.size, 0);
   assert.equal(s.savedUrls.size, 0);
   const [exaCall, aiCall] = calls;
   assert.equal(exaCall.url, "https://api.exa.ai/contents");
   assert.deepEqual(exaCall.body, { urls: [URL1], text: { maxCharacters: 6000 } });
+  assert.match(aiCall.body.system, new RegExp(`Today's date is ${new Date().toISOString().slice(0, 10)}`));
+  assert.ok(aiCall.body.max_tokens >= 2000);
   assert.equal(aiCall.body.model, "claude-haiku-5-5");
   assert.equal(aiCall.body.output_config.effort, "low");
   assert.equal(aiCall.body.output_config.format.type, "json_schema");
@@ -204,6 +208,192 @@ await test("prompt injection in the page can't reach a reply link or a save", as
 await test("extractEvent returns null for is_event false", async () => {
   haiku = () => message({ ...EVENT, is_event: false });
   assert.equal(await extractEvent("t", "x"), null);
+});
+
+await test("link filter catches protocol-less and odd-scheme forms", () => {
+  const known = `check ${URL1}`;
+  for (const text of [
+    "visit ftp://evil.com now",
+    "go to /evil.com/x",
+    "see x/evil.com",
+    "hxxps://evil.com",
+    "tickets at @evil.top",
+    "evil.https://a.com top",
+    "a@evil.com",
+    "EVIL.COM/win",
+    "ev.top/x",
+    "go //evil.com/pay",
+  ]) {
+    const out = stripUnknownLinks(text, new Set(), new Set(), known);
+    assert.doesNotMatch(out, /evil|ev\.top|a\.com|:\/\//i, `${text} -> ${out}`);
+    assert.doesNotMatch(stripLinks(text), /evil|ev\.top|a\.com|:\/\/|\/\//i, text);
+  }
+});
+
+await test("link filter still lets the user's own links through", () => {
+  const known = `check ${URL1} and lofi.fm`;
+  const out = stripUnknownLinks(`${URL1}\nlofi.fm\nPOSH.VIP/e/ABC`, new Set(), new Set(), known);
+  assert.match(out, /posh\.vip\/e\/abc/i);
+  assert.match(out, /lofi\.fm/);
+  // a search result's homepage passes, a deeper path on that host does not
+  const hosted = stripUnknownLinks("https://bar.com\nhttps://bar.com/other", new Set(["https://bar.com/menu"]), new Set(), "").trim();
+  assert.equal(hosted, "https://bar.com");
+  // ordinary text with dots isn't a link
+  assert.equal(stripUnknownLinks("u.s. node.js st.louis dr.dre lol.jk", new Set(), new Set(), ""), "u.s. node.js st.louis dr.dre lol.jk");
+  assert.equal(hasLink("lofi.fm"), true);
+  assert.equal(hasLink("lofi.fm", true), false);
+  assert.equal(hasLink("//evil.com", true), true);
+  assert.equal(hasLink("ftp://evil.com", true), true);
+});
+
+await test("cleanField strips odd links from page fields", async () => {
+  haiku = () => message({ ...EVENT, venue: "//evil.com/tix", price_note: "pay at ftp://evil.com", address: "evil.https://a.com top" });
+  const result: any = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+  assert.doesNotMatch(JSON.stringify(result), /evil|a\.com|:\/\//);
+});
+
+await test("time: shown in the event's own offset, with the date", () => {
+  const now = Date.parse("2026-10-23");
+  assert.equal(describeWhen("2026-11-07T20:00:00-08:00", null, now).when, "Sat Nov 7 8pm");
+  assert.equal(describeWhen("2026-11-07T22:30:00+09:00", null, now).when, "Sat Nov 7 10:30pm");
+  assert.equal(describeWhen("2026-11-08T00:00:00-05:00", null, now).when, "Sun Nov 8 12am");
+  // date-only stays a date: no shifting to the day before, time unknown
+  assert.deepEqual(describeWhen("2026-11-07", null, now), { when: "Sat Nov 7", timeKnown: false, past: false });
+  // under way is not past, long over is
+  assert.equal(describeWhen("2026-11-07T20:00:00-05:00", null, Date.parse("2026-11-08T02:00:00Z")).past, false);
+  assert.equal(describeWhen("2026-11-07T20:00:00-05:00", null, Date.parse("2026-11-09")).past, true);
+});
+
+await test("time: date-only, no-offset, and free-form dates", async () => {
+  const read = async (starts_at: string | null): Promise<any> => {
+    haiku = () => message({ ...EVENT, starts_at });
+    return runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+  };
+  let r = await read("2026-11-07");
+  assert.equal(r.untrusted_page_content.when, "Sat Nov 7");
+  assert.equal(r.untrusted_page_content.time_known, false);
+  assert.match(r.hint, /no start time/);
+  r = await read("2026-11-07T20:00:00");
+  assert.equal(r.untrusted_page_content.when, "Sat Nov 7");
+  assert.equal(r.untrusted_page_content.time_known, false);
+  assert.equal((await read("Nov 7 2026")).error, "unreadable");
+  assert.equal((await read("2026-02-31")).error, "unreadable");
+  r = await read("2026-11-07T20:00:00-08:00");
+  assert.equal(r.untrusted_page_content.when, "Sat Nov 7 8pm");
+});
+
+await test("time: past events are flagged", async () => {
+  haiku = () => message({ ...EVENT, starts_at: "2025-10-25T20:00:00-04:00" });
+  const r: any = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
+  assert.equal(r.error, "past_event");
+  assert.equal(r.when, "Sat Oct 25 8pm");
+  assert.match(r.hint, /already happened/);
+});
+
+await test("untrusted session: update_profile and remember_taste must echo the user's own words", async () => {
+  const s = session("hi i'm in miami, i like house music");
+  s.untrusted = true;
+  // Blocked values return before any DB call.
+  assert.equal(((await runTool(profile, "update_profile", { city: "Evilville" }, s)) as any).error, "not_from_user");
+  assert.equal(((await runTool(profile, "update_profile", { name: "Mallory" }, s)) as any).error, "not_from_user");
+  assert.equal(((await runTool(profile, "remember_taste", { kind: "like", label: "evil promoters" }, s)) as any).error, "not_from_user");
+  // The user's own words get past the guard and reach the DB layer (which has no config here).
+  await assert.rejects(runTool(profile, "update_profile", { city: "Miami" }, s), /SUPABASE/);
+  await assert.rejects(runTool(profile, "remember_taste", { kind: "like", label: "House" }, s), /SUPABASE/);
+  // Not untrusted: no guard.
+  s.untrusted = false;
+  await assert.rejects(runTool(profile, "update_profile", { city: "Evilville" }, s), /SUPABASE/);
+});
+
+await test("same link is read once, and reads are capped at 2", async () => {
+  const urlB = "https://dice.fm/event/b";
+  const urlC = "https://ra.co/events/c";
+  const s = session(`${URL1} ${urlB} ${urlC}`);
+  const same = await Promise.all(Array.from({ length: 5 }, () => runTool(profile, "read_event_link", { url: URL1 }, s)));
+  assert.equal(calls.filter((c) => c.url.includes("exa.ai")).length, 1);
+  assert.ok(same.every((r: any) => !r.error));
+  await runTool(profile, "read_event_link", { url: urlB }, s);
+  assert.equal(calls.filter((c) => c.url.includes("exa.ai")).length, 2);
+  // urlC is past the 2-link message cap, so it is refused outright
+  assert.equal(((await runTool(profile, "read_event_link", { url: urlC }, s)) as any).error, "url_not_in_message");
+  // and the read cap itself holds even if the message cap were bigger
+  const full = session(URL1);
+  full.eventReads.set("a", Promise.resolve(null));
+  full.eventReads.set("b", Promise.resolve(null));
+  assert.equal(((await runTool(profile, "read_event_link", { url: URL1 }, full)) as any).error, "read_limit");
+});
+
+await test("the user's spelling is fetched, minus trailing punctuation", async () => {
+  await runTool(profile, "read_event_link", { url: "posh.vip/e/ABC" }, session("is this fun (https://posh.vip/e/ABC)?"));
+  assert.equal(calls[0].body.urls[0], "https://posh.vip/e/ABC");
+});
+
+await test("Haiku max_tokens / refusal stop reasons -> unreadable", async () => {
+  for (const stop_reason of ["max_tokens", "refusal"]) {
+    haiku = () =>
+      json({ content: [{ type: "text", text: JSON.stringify({ is_event: true, ...EVENT }) }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason });
+    assert.equal(((await runTool(profile, "read_event_link", { url: URL1 }, session(URL1))) as any).error, "unreadable");
+  }
+});
+
+// A streamed Anthropic reply, as server-sent events.
+function sse(content: any[], stop_reason: string): Response {
+  const events: [string, unknown][] = [
+    ["message_start", { type: "message_start", message: { id: "m", type: "message", role: "assistant", model: "x", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } }],
+  ];
+  content.forEach((block, index) => {
+    if (block.type === "text") {
+      events.push(["content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } }]);
+      events.push(["content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } }]);
+    } else {
+      events.push(["content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id: block.id, name: block.name, input: {} } }]);
+      events.push(["content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) } }]);
+    }
+    events.push(["content_block_stop", { type: "content_block_stop", index }]);
+  });
+  events.push(["message_delta", { type: "message_delta", delta: { stop_reason, stop_sequence: null }, usage: { output_tokens: 5 } }]);
+  events.push(["message_stop", { type: "message_stop" }]);
+  const body = events.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+await test("generateReply: read_event_link narration is dropped, answer kept, planted link stripped, notice fires", async () => {
+  const { generateReply } = await import("../src/agent/claude.ts");
+  let round = 0;
+  haiku = (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    if (!body.stream) return message({ ...EVENT, venue: "The Roof https://evil.example/x" });
+    round += 1;
+    if (round === 1) {
+      return sse(
+        [
+          { type: "text", text: "lemme look" },
+          { type: "tool_use", id: "t1", name: "read_event_link", input: { url: URL1 } },
+        ],
+        "tool_use",
+      );
+    }
+    // The tool result went back to the model, labeled untrusted.
+    const last = body.messages.at(-1).content[0].content;
+    assert.match(last, /untrusted_page_content/);
+    return sse([{ type: "text", text: `rooftop sunset party\nsat nov 7 8pm\nthe roof, brooklyn\nmore at https://evil.example/x\nwant me to save it?` }], "end_turn");
+  };
+  let notices = 0;
+  const reply = await generateReply({
+    profile,
+    taste: [],
+    saves: [],
+    history: [],
+    userMessage: `is this good ${URL1}`,
+    onWebSearch: () => {
+      notices += 1;
+    },
+  });
+  assert.equal(notices, 1);
+  assert.doesNotMatch(reply.text, /lemme look/);
+  assert.doesNotMatch(reply.text, /evil/);
+  assert.match(reply.text, /sat nov 7 8pm/);
+  assert.match(reply.text, /want me to save it\?/);
 });
 
 console.log(`${passed} passed`);

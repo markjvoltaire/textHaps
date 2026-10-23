@@ -119,6 +119,7 @@ export async function generateReply(input: {
     untrusted: hasLink(stored, true),
     userText,
     userMessage: input.userMessage,
+    eventReads: new Map(),
     storedText: bareLinks(stored).join("\n"),
   };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then

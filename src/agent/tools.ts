@@ -5,8 +5,8 @@ import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
 import { searchWeb } from "../search/exa.ts";
-import { eventLinksIn, readEventPage } from "./eventLink.ts";
-import { hasLink, isExactLink, LINK } from "./links.ts";
+import { describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
+import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
@@ -145,6 +145,14 @@ function asStringArray(value: unknown): string[] | undefined {
   return tags.length > 0 ? tags : undefined;
 }
 
+/** Whether every word of `value` is in what the user wrote, so a page can't pick their city, name, or taste. */
+function saidByUser(value: string, session: ToolSession): boolean {
+  const said = session.userText.toLowerCase();
+  const lower = value.toLowerCase();
+  const words = lower.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 3);
+  return words.length === 0 ? said.includes(lower) : words.every((word) => said.includes(word));
+}
+
 function isTasteKind(value: unknown): value is TasteKind {
   return value === "like" || value === "dislike" || value === "constraint";
 }
@@ -161,6 +169,8 @@ export type ToolSession = {
   userText: string;
   /** Just the message being answered, the only place read_event_link accepts a link from. */
   userMessage: string;
+  /** Event pages read this reply, by normalized url, so the same link is read once and reads stay capped. */
+  eventReads: Map<string, Promise<EventDetails | null>>;
   /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
   storedText: string;
   /** Untrusted content (search results, scraped listings) was seen this reply, so links get filtered. Images set it too. */
@@ -169,6 +179,8 @@ export type ToolSession = {
 
 /** Each web search costs a tool round, so cap them to leave room for an answer. */
 const MAX_WEB_SEARCHES = 3;
+/** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
+const MAX_EVENT_READS = 2;
 
 export async function runTool(
   profile: Profile,
@@ -194,28 +206,48 @@ export async function runTool(
       const url = asString(input.url);
       if (!url) return { error: "url is required" };
       // Only links the user sent right now, so a link from a page or old chat can't make Haps fetch it.
-      const allowed = eventLinksIn(session.userMessage);
-      if (!isExactLink(url, allowed)) {
+      // The user's own spelling is what gets fetched, not whatever the model passed.
+      const sent = eventLinksIn(session.userMessage).find((link) => isExactLink(url, [link]));
+      if (!sent) {
         return { error: "url_not_in_message", hint: "Only read a link the user sent in their latest message." };
       }
       // The page is read as untrusted text; its fields never join webUrls or savedUrls.
       session.untrusted = true;
-      const event = await readEventPage(url);
-      if (!event) {
+      const key = normalizeLink(sent);
+      let read = session.eventReads.get(key);
+      if (!read) {
+        if (session.eventReads.size >= MAX_EVENT_READS) {
+          return { error: "read_limit", hint: "No more links this reply. Ask them for the day, time, and place." };
+        }
+        read = readEventPage(sent);
+        session.eventReads.set(key, read);
+      }
+      const event = await read;
+      if (!event?.starts_at) {
         return { error: "unreadable", hint: "Ask them for the day, time, and place." };
+      }
+      const when = describeWhen(event.starts_at, event.ends_at);
+      if (when.past) {
+        return {
+          error: "past_event",
+          when: when.when,
+          hint: "That date already passed. Say it looks like it already happened and ask if they meant a different one.",
+        };
       }
       return {
         untrusted_page_content: {
           title: event.title,
-          when: event.starts_at ? friendlyWhen(event.starts_at) : null,
+          when: when.when,
+          time_known: when.timeKnown,
           starts_at: event.starts_at,
           ends_at: event.ends_at,
           venue: event.venue,
           address: event.address,
-          city: event.city,
           price_note: event.price_note,
         },
-        hint: "Offer to save it with save_event, using the url they sent.",
+        hint: when.timeKnown
+          ? "Offer to save it with save_event, using the url they sent."
+          : "The page had no start time. Ask what time it starts, and offer to save it with save_event using the url they sent.",
       };
     }
     case "search_events": {
@@ -261,6 +293,9 @@ export async function runTool(
       if (session.untrusted && hasLink(asString(input.label)!)) {
         return { error: "link_in_label", hint: "Labels are short taste words, not links." };
       }
+      if (session.untrusted && !saidByUser(asString(input.label)!, session)) {
+        return { error: "not_from_user", hint: "Only save tastes the user said themselves." };
+      }
       const signal = await rememberTaste({
         profileId: profile.id,
         kind: input.kind,
@@ -303,6 +338,9 @@ export async function runTool(
       const city = asString(input.city);
       if (!name && !city) {
         return { error: "nothing_to_update" };
+      }
+      if (session.untrusted && [name, city].some((value) => value && !saidByUser(value, session))) {
+        return { error: "not_from_user", hint: "Only use a name or city the user said themselves." };
       }
       const updated = await updateProfile(profile.id, {
         ...(name ? { name } : {}),
