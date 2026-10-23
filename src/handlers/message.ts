@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
-import { attachment, contact, group, type Message, type Space } from "spectrum-ts";
+import { attachment, contact, group, richlink, type Message, type Space } from "spectrum-ts";
 import { background, nativeContactCard } from "spectrum-ts/providers/imessage";
 import { generateReply } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
@@ -23,6 +23,8 @@ const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me inst
 // A few minutes of voice note is well under this.
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const AUDIO_READ_TIMEOUT_MS = 10_000;
+// A reply line that is nothing but a link, sent as a rich link card.
+const BARE_URL = /^https?:\/\/\S+$/i;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -204,29 +206,38 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
 
     // Only commit the exchange once the model actually produced something.
-    // Keep only what the user actually sees: the lead plus up to 2 more bubbles.
-    const bubbles = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean).slice(0, 3);
-    span.update({ output: bubbles.join("\n"), metadata: { platform, flyers: imagePaths.length } });
-    await appendExchange(profile.id, senderId, text, bubbles.join("\n")).catch((err: unknown) => {
+    // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
+    // only a link goes out as one rich link card after them, so it doesn't take a text slot.
+    const lines = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean);
+    const link = lines.find((line) => BARE_URL.test(line));
+    const bubbles = lines.filter((line) => !BARE_URL.test(line)).slice(0, 3);
+    const sent = [...bubbles, ...(link ? [link] : [])].join("\n");
+    span.update({ output: sent, metadata: { platform, flyers: imagePaths.length, richlink: Boolean(link) } });
+    await appendExchange(profile.id, senderId, text, sent).catch((err: unknown) => {
       console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
     });
 
     console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)} images=${imagePaths.length}`);
     // Short texts, not one block: each line goes out as its own bubble.
-    const [lead = reply, ...rest] = bubbles;
+    const [lead, ...rest] = bubbles;
     const flyers = imagePaths.map(flyerAttachment);
     const first = flyers[0];
     const second = flyers[1];
-    if (first && second) {
-      await space.send(group(first, second, ...flyers.slice(2)), lead);
-    } else if (first) {
-      await space.send(first, lead);
-    } else {
+    const photos = first && second ? group(first, second, ...flyers.slice(2)) : first;
+    if (photos && lead) {
+      await space.send(photos, lead);
+    } else if (photos) {
+      await space.send(photos);
+    } else if (lead) {
       await space.send(lead);
     }
     for (const bubble of rest.slice(0, 2)) {
       await new Promise((resolve) => setTimeout(resolve, 900));
       await space.send(bubble);
+    }
+    if (link) {
+      if (lead || first) await new Promise((resolve) => setTimeout(resolve, 900));
+      await space.send(richlink(link));
     }
     // After the first reply, not before it, so the chat opens with Haps talking.
     await ensureContactCard(space, profile);

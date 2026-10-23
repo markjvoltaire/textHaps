@@ -180,6 +180,14 @@ export type ToolSession = {
   untrusted: boolean;
 };
 
+function isExaPage(url: string): boolean {
+  try {
+    return /(^|\.)exa\.ai$/i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Each web search costs a tool round, so cap them to leave room for an answer. */
 const MAX_WEB_SEARCHES = 3;
 /** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
@@ -200,8 +208,9 @@ export async function runTool(
       }
       session.webSearches += 1;
       session.untrusted = true;
-      const results = await searchWeb(query);
-      for (const result of results) session.webUrls.add(result.url);
+      // Exa's own place pages (exa.ai/library/...) are its index, not the venue's site, so they're never sent.
+      const results = (await searchWeb(query)).map((result) => (isExaPage(result.url) ? { ...result, url: "" } : result));
+      for (const result of results) if (result.url) session.webUrls.add(result.url);
       // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.
       return { count: results.length, untrusted_web_content: results };
     }
