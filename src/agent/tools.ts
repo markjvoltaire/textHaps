@@ -140,6 +140,8 @@ export type ToolSession = {
   webSearches: number;
   /** Links web_search returned, the only page links a reply may pass on. */
   webUrls: Set<string>;
+  /** Untrusted content was seen this reply, so links get filtered. Images set it too. */
+  untrusted: boolean;
 };
 
 /** Each web search costs a tool round, so cap them to leave room for an answer. */
@@ -159,6 +161,7 @@ export async function runTool(
         return { error: "search_limit", hint: "No more searches this reply. Answer with what you already found." };
       }
       session.webSearches += 1;
+      session.untrusted = true;
       const results = await searchWeb(query);
       for (const result of results) session.webUrls.add(result.url);
       // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.

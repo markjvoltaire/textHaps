@@ -52,6 +52,7 @@ Other tools:
 - When they share a like, dislike, or constraint, call remember_taste.
 - When they mention their city or name, call update_profile.
 - When they want to keep an event or send a link, call save_event.
+- If you already wrote your answer next to a tool call, don't repeat it after.
 - Flyers for searched events are attached as photos automatically. Don't describe the images.
 - Don't say you're searching. Just answer.
 
@@ -93,9 +94,9 @@ export async function generateReply(input: {
     ...input.history.map((turn) => ({ role: turn.role, content: turn.content })),
     { role: "user" as const, content: input.userMessage },
   ];
-  const session: ToolSession = { searched: [], webSearches: 0, webUrls: new Set() };
+  const session: ToolSession = { searched: [], webSearches: 0, webUrls: new Set(), untrusted: false };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then
-  // remember_taste), so text from every turn is kept. The handler sends the first 3 lines.
+  // remember_taste), so that text is kept too. finish() decides how it joins the final turn.
   const written: string[] = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -143,12 +144,17 @@ export async function generateReply(input: {
     // Text next to a search is "let me look" narration. Text next to remember_taste or
     // save_event is usually the answer itself, so it's kept.
     const narration = response.content.some(
-      (block) => block.type === "tool_use" && (block.name === "web_search" || block.name === "search_events"),
+      (block) => block.type === "tool_use" && (block.name === "web_search" || block.name === "search_events" || block.name === "list_saves"),
     );
     const text = textFrom(response.content);
 
     if (response.stop_reason !== "tool_use") {
-      return finish([...written, text], session, knownText(system, messages));
+      // A final turn with its own list of lines is the whole answer. A short one (an ack)
+      // goes after what was written earlier, so earlier lines can't push recs out of the
+      // handler's 3 bubbles and recs restated in the final turn aren't sent twice.
+      const finalLines = text.split("\n").filter((line) => line.trim()).length;
+      const parts = finalLines >= 2 ? [text] : [...written, text];
+      return finish(parts, session, knownText(system, messages));
     }
 
     if (text && !narration) written.push(text);
@@ -187,9 +193,19 @@ export async function generateReply(input: {
 }
 
 function finish(parts: string[], session: ToolSession, known: string): AgentReply {
-  const text = parts.filter(Boolean).join("\n");
+  const seen = new Set<string>();
+  const text = parts
+    .flatMap((part) => part.split("\n"))
+    .filter((line) => {
+      const key = line.trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join("\n");
   return {
-    text: session.webSearches > 0 ? stripUnknownLinks(text, session.webUrls, known) : text,
+    // Images count as untrusted too (set where they're read), since text inside them can plant links.
+    text: session.untrusted ? stripUnknownLinks(text, session.webUrls, known) : text,
     imagePaths: eventFlyers(session.searched),
     events: session.searched,
   };
@@ -222,17 +238,30 @@ function normalizeLink(link: string): string {
   return link.replace(/[).,!?;:'"]+$/, "").replace(/\/+$/, "").replace(/^https?:\/\//i, "").toLowerCase();
 }
 
+/** Lowercased host without a leading "www.", or undefined if the link doesn't parse. */
+function linkHost(link: string): string | undefined {
+  const clean = link.replace(/[).,!?;:'"]+$/, "");
+  try {
+    return new URL(/^https?:\/\//i.test(clean) ? clean : `https://${clean}`).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * A planted page can tell Claude to send the user a link. Links only go out when they
  * came back from a search or were already in the chat, so a page can't add its own.
+ * Claude often shortens a result to its homepage, so a link on the same host also passes.
  */
 function stripUnknownLinks(text: string, searched: Set<string>, known: string): string {
-  const allowed = new Set([...searched].map(normalizeLink));
-  const knownLower = known.toLowerCase();
+  const knownLinks = known.match(LINK) ?? [];
+  const trusted = [...searched, ...knownLinks];
+  const allowed = new Set(trusted.map(normalizeLink));
+  const hosts = new Set(trusted.map(linkHost).filter((host): host is string => !!host));
   return text
     .replace(LINK, (link) => {
-      const key = normalizeLink(link);
-      if (allowed.has(key) || knownLower.includes(key)) return link;
+      const host = linkHost(link);
+      if (allowed.has(normalizeLink(link)) || (host && hosts.has(host))) return link;
       console.warn(`[links] dropped link not from search results: ${link}`);
       return "";
     })
