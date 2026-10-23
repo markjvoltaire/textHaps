@@ -6,7 +6,7 @@ import type { EventRow, Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import { formatSave } from "../db/saves.ts";
 import { formatError } from "../utils/text.ts";
-import { hasLink, stripUnknownLinks } from "./links.ts";
+import { bareLinks, hasLink, stripUnknownLinks } from "./links.ts";
 import { HAPS_TOOLS, runTool, type ToolSession } from "./tools.ts";
 
 export type AgentReply = {
@@ -101,19 +101,23 @@ export async function generateReply(input: {
     { role: "user" as const, content: input.userMessage },
   ];
   // Taste labels and saves are stored text that went into the prompt, so a link planted in
-  // one earlier can come back in this reply even with no lookup. Filter whenever one is there.
+  // one earlier can come back in this reply even with no lookup. Filter whenever a full
+  // link is there; a bare "lofi.fm" label is the user's own and is allowed through instead.
   const stored = [...input.taste.map((signal) => signal.label), ...input.saves.map(formatSave)].join("\n");
   const session: ToolSession = {
     searched: [],
     webSearches: 0,
     webUrls: new Set(),
-    savedUrls: new Set(),
-    untrusted: hasLink(stored),
+    savedUrls: new Set(input.saves.flatMap((save) => [save.url, save.listing?.url].filter((url): url is string => !!url))),
+    untrusted: hasLink(stored, true),
     userText,
+    storedText: bareLinks(stored).join("\n"),
   };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then
   // remember_taste), so that text is kept too. finish() decides how it joins the final turn.
   const written: string[] = [];
+  // Set when a lookup ran after the last kept text, so the final turn is the newer answer.
+  let lookupSince = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     // Out of tool rounds: make the last one answer with what it has.
@@ -165,22 +169,21 @@ export async function generateReply(input: {
 
     if (response.stop_reason !== "tool_use") {
       // A final turn that lists several lines and repeats something already written is the
-      // whole answer, so earlier lines can't push it out of the handler's 3 bubbles. Any
-      // other final turn (an ack, or new lines) goes after what was written.
+      // whole answer. After a lookup the final turn is the answer to it, so it goes first and
+      // earlier chatter can't push it out of the handler's 3 bubbles. Otherwise (an ack, or
+      // new lines) it goes after what was written.
       const earlier = new Set(written.flatMap(lines));
       const restates = lines(text).length >= 2 && lines(text).some((line) => earlier.has(line));
-      return finish(restates ? [text] : [...written, text], session);
+      return finish(restates ? [text] : lookupSince ? [text, ...written] : [...written, text], session);
     }
 
-    // A lookup means the real answer comes after it, so one-line chatter written before it
-    // ("bet, brooklyn it is") is dropped rather than pushing the recs out of the 3 bubbles.
-    // Multi-line entries are earlier recs and stay.
-    if (toolNames.some(isLookup)) {
-      const kept = written.filter((entry) => lines(entry).length > 1);
-      written.length = 0;
-      written.push(...kept);
+    // Text written in the same turn as a lookup is part of the answer, not older chatter.
+    if (text && !narration) {
+      written.push(text);
+      lookupSince = false;
+    } else if (toolNames.some(isLookup)) {
+      lookupSince = true;
     }
-    if (text && !narration) written.push(text);
     messages.push({ role: "assistant", content: response.content });
 
     const runBlock = async (block: Anthropic.ToolUseBlock): Promise<Anthropic.ToolResultBlockParam> => {
@@ -233,7 +236,7 @@ function finish(parts: string[], session: ToolSession): AgentReply {
     .join("\n");
   return {
     // Images count as untrusted too (set where they're read), since text inside them can plant links.
-    text: session.untrusted ? stripUnknownLinks(text, session.webUrls, session.savedUrls, session.userText) : text,
+    text: session.untrusted ? stripUnknownLinks(text, session.webUrls, session.savedUrls, `${session.userText}\n${session.storedText}`) : text,
     imagePaths: eventFlyers(session.searched),
     events: session.searched,
   };

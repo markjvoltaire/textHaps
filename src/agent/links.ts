@@ -4,13 +4,29 @@ const TLDS =
   "|(?:co\\.|com\\.)?(?:uk|ca|de|fr|es|it|nl|au|br|mx|jp)" +
   "|live|fm|nyc|la|shop|store|tickets|party|bar|art|studio|world|fun|space|online|tech";
 
+// Any other 2-24 letter ending counts too (evil.top, evil.vip), as long as the name before it
+// has 3+ letters and the ending isn't code or a file type, so "st.louis", "dr.dre" and "node.js" pass.
+const NOT_TLD = "js|jk|ts|py|md|txt|png|jpg|jpeg|gif|pdf|html|css|json|heic|mov|mp4|mp3";
+
 export const LINK = new RegExp(
-  `\\bhttps?://[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|(?<![\\w@./-])(?:[a-z0-9-]+\\.)+(?:${TLDS})(?![\\w-]|\\.\\w)(?:/[^\\s<>"]*)?`,
+  `\\bhttps?://[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|` +
+    `(?<![\\w@./-])(?:(?:[a-z0-9-]+\\.)+(?:${TLDS})|(?:[a-z0-9-]+\\.)*[a-z0-9-]{3,}\\.(?:co\\.|com\\.)?(?!(?:${NOT_TLD})\\b)[a-z]{2,24})` +
+    `(?![\\w-]|\\.\\w)(?:/[^\\s<>"]*)?`,
   "gi",
 );
 
-export function hasLink(text: string): boolean {
-  return (text.match(LINK) ?? []).length > 0;
+/** A scheme, www. or path link, as opposed to a bare name like "lofi.fm". */
+function isFullLink(link: string): boolean {
+  return /^(https?:|www\.)/i.test(link) || link.includes("/");
+}
+
+/** Whether `text` has a link; with `fullOnly`, bare names like "lofi.fm" don't count. */
+export function hasLink(text: string, fullOnly = false): boolean {
+  return (text.match(LINK) ?? []).some((link) => !fullOnly || isFullLink(link));
+}
+
+export function bareLinks(text: string): string[] {
+  return (text.match(LINK) ?? []).filter((link) => !isFullLink(link));
 }
 
 const TRAILING = /[).,!?;:'"]+$/;

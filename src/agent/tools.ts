@@ -145,6 +145,8 @@ export type ToolSession = {
   savedUrls: Set<string>;
   /** The user's own text this reply (chat plus current message), the only other source of links. */
   userText: string;
+  /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
+  storedText: string;
   /** Untrusted content (search results, scraped listings) was seen this reply, so links get filtered. Images set it too. */
   untrusted: boolean;
 };
@@ -230,6 +232,7 @@ export async function runTool(
         return { error: "link_in_title_or_note", hint: "Keep links out of titles and notes. Put the link in url." };
       }
       if (
+        session.untrusted &&
         url &&
         !isExactLink(url, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])
       ) {
