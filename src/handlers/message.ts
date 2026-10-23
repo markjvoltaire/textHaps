@@ -13,7 +13,7 @@ import type { Profile } from "../db/types.ts";
 import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
-import { checkRateLimit, shouldWarn } from "./rateLimit.ts";
+import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
 
@@ -21,6 +21,17 @@ const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
 const SEARCHING_REPLIES = ["let me check for you", "let me see what i find", "one sec, looking"];
 const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me instead?";
+// A few minutes of voice note is well under this.
+const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
+const AUDIO_READ_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 type Audio = { mimeType: string; read: () => Promise<Buffer> };
 
@@ -55,6 +66,8 @@ async function ensureContactCard(space: Space, profile: Profile): Promise<void> 
   if (profile.platform !== "imessage" || profile.contact_card_sent_at) return;
   try {
     await space.send(nativeContactCard());
+    // Marked now so a failing card send below can't re-send the native card on every reply.
+    await markContactCardSent(profile.id);
     const phone = process.env.HAPS_PHONE_NUMBER;
     if (phone) {
       await space.send(
@@ -65,7 +78,6 @@ async function ensureContactCard(space: Space, profile: Profile): Promise<void> 
         }),
       );
     }
-    await markContactCardSent(profile.id);
     console.log(`[contact] shared with sender=${profile.platform_user_id} card=${Boolean(phone)}`);
   } catch (err) {
     console.warn(`[contact] failed for sender=${profile.platform_user_id}:`, formatError(err));
@@ -101,21 +113,47 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   });
 
   const senderId = message.sender?.id ?? space.id;
+  const platform = message.platform || "imessage";
   let text = extractText(message.content).trim();
+  if (!text && !audio) return;
+
+  // Before any voice work, so an over-limit sender can't run up the Deepgram bill.
+  let profile: Profile;
+  try {
+    profile = await upsertProfile(platform, senderId);
+    const limit = await checkRateLimit(profile.id);
+    if (!limit.ok) {
+      console.warn(`[limit] sender=${senderId} over ${limit.window} limit`);
+      if (shouldWarn(profile.id, limit.window)) await space.send(RATE_LIMIT_REPLY);
+      return;
+    }
+  } catch (err) {
+    console.error(`[handler] profile or limit check failed for sender=${senderId}:`, formatError(err));
+    await space.send(FALLBACK_REPLY);
+    return;
+  }
+
   // Voice notes become text first, then go through the same flow as a typed message.
   if (audio) {
+    if (!voiceAllowed(profile.id)) {
+      console.warn(`[voice] sender=${senderId} too many failed voice notes, skipping`);
+      return;
+    }
     try {
-      text = await transcribe(await audio.read(), audio.mimeType);
+      // Spectrum doesn't give the size up front, so a stalled download is cut off instead.
+      const buf = await withTimeout(audio.read(), AUDIO_READ_TIMEOUT_MS, "audio download");
+      if (buf.length > MAX_AUDIO_BYTES) throw new Error(`audio too large: ${buf.length} bytes`);
+      text = await transcribe(buf, audio.mimeType);
       console.log(`[voice] sender=${senderId} mime=${audio.mimeType} transcript=${JSON.stringify(text)}`);
     } catch (err) {
       console.warn(`[voice] transcription failed for sender=${senderId}:`, formatError(err));
     }
     if (!text) {
+      noteVoiceFailure(profile.id);
       await space.send(VOICE_FALLBACK_REPLY);
       return;
     }
   }
-  if (!text) return;
 
   console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}`);
 
@@ -123,9 +161,6 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   // Claude calls and tools in between (no-op when Langfuse keys aren't set).
   await startActiveObservation("imessage-reply", async (span) => {
     span.update({ input: text, metadata: { voice: Boolean(audio) } });
-    const platform = message.platform || "imessage";
-    let profile: Profile;
-    let profileId: string;
     let reply: string;
     let imagePaths: string[] = [];
     // Web searches take a few seconds, so text a quick heads-up once and keep the typing dots going.
@@ -139,14 +174,6 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         .catch((err: unknown) => console.warn(`[searching] notice failed for sender=${senderId}:`, formatError(err)));
     };
     try {
-      profile = await upsertProfile(platform, senderId);
-      profileId = profile.id;
-      const limit = await checkRateLimit(profile.id);
-      if (!limit.ok) {
-        console.warn(`[limit] sender=${senderId} over ${limit.window} limit`);
-        if (shouldWarn(profile.id, limit.window)) await space.send(RATE_LIMIT_REPLY);
-        return;
-      }
       await ensureBackground(space, profile);
       const [taste, saves, history] = await Promise.all([
         listTaste(profile.id),
@@ -166,12 +193,16 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     } catch (err) {
       console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
       span.update({ level: "ERROR", statusMessage: formatError(err) });
+      // Let a pending heads-up land first so the glitch message doesn't arrive before it.
+      await searchingNotice;
       await space.send(FALLBACK_REPLY);
       return;
     }
 
     if (!reply) {
       console.warn(`[claude] empty reply for sender=${senderId}`);
+      // They were told "let me check", so don't leave them hanging.
+      if (searchingNotice) await space.send(FALLBACK_REPLY);
       return;
     }
 
@@ -179,7 +210,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles.
     const bubbles = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean).slice(0, 3);
     span.update({ output: bubbles.join("\n"), metadata: { platform, flyers: imagePaths.length } });
-    await appendExchange(profileId, senderId, text, bubbles.join("\n")).catch((err: unknown) => {
+    await appendExchange(profile.id, senderId, text, bubbles.join("\n")).catch((err: unknown) => {
       console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
     });
 

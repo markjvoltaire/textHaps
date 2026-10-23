@@ -137,7 +137,13 @@ function isTasteKind(value: unknown): value is TasteKind {
 /** Per-reply state. Each reply gets its own, so one user's search never leaks into another's. */
 export type ToolSession = {
   searched: EventRow[];
+  webSearches: number;
+  /** Links web_search returned, the only page links a reply may pass on. */
+  webUrls: Set<string>;
 };
+
+/** Each web search costs a tool round, so cap them to leave room for an answer. */
+const MAX_WEB_SEARCHES = 3;
 
 export async function runTool(
   profile: Profile,
@@ -149,8 +155,14 @@ export async function runTool(
     case "web_search": {
       const query = asString(input.query);
       if (!query) return { error: "query is required" };
+      if (session.webSearches >= MAX_WEB_SEARCHES) {
+        return { error: "search_limit", hint: "No more searches this reply. Answer with what you already found." };
+      }
+      session.webSearches += 1;
       const results = await searchWeb(query);
-      return { count: results.length, results };
+      for (const result of results) session.webUrls.add(result.url);
+      // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.
+      return { count: results.length, untrusted_web_content: results };
     }
     case "search_events": {
       const taste = await listTaste(profile.id);

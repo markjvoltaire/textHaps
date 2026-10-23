@@ -7,6 +7,8 @@ import ffmpegPath from "ffmpeg-static";
 // keyterm nudges Deepgram toward hearing the name "Haps".
 const DEEPGRAM_URL = "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&keyterm=Haps";
 
+const FFMPEG_TIMEOUT_MS = 10_000;
+
 type DeepgramResponse = {
   results?: { channels?: { alternatives?: { transcript?: string }[] }[] };
 };
@@ -33,11 +35,14 @@ function runFfmpeg(args: string[]): Promise<Buffer> {
     const ffmpeg = spawn(ffmpegPath, args);
     const chunks: Buffer[] = [];
     let stderr = "";
+    const timer = setTimeout(() => ffmpeg.kill("SIGKILL"), FFMPEG_TIMEOUT_MS);
     ffmpeg.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
     ffmpeg.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     ffmpeg.on("error", reject);
-    ffmpeg.on("close", (code) => {
-      if (code === 0) resolve(Buffer.concat(chunks));
+    ffmpeg.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (signal === "SIGKILL") reject(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
+      else if (code === 0) resolve(Buffer.concat(chunks));
       else reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-300)}`));
     });
   });
@@ -56,6 +61,7 @@ export async function transcribe(audio: Buffer, mimeType: string): Promise<strin
       "Content-Type": isCaf ? "audio/ogg" : mimeType,
     },
     body: new Uint8Array(isCaf ? await cafToOgg(audio) : audio),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) {
     throw new Error(`deepgram ${response.status}: ${await response.text()}`);
