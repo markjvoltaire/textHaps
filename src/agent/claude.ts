@@ -120,6 +120,7 @@ export async function generateReply(input: {
     userText,
     userMessage: input.userMessage,
     eventReads: new Map(),
+    pageText: "",
     storedText: bareLinks(stored).join("\n"),
   };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then

@@ -2,16 +2,16 @@
 const TLDS =
   "com|net|org|io|co|app|ly|me|gg|xyz|link|site|info|biz|us|tv|to|ai|so|page|events|club" +
   "|(?:co\\.|com\\.)?(?:uk|ca|de|fr|es|it|nl|au|br|mx|jp)" +
-  "|live|fm|nyc|la|shop|store|tickets|party|bar|art|studio|world|fun|space|online|tech";
+  "|live|fm|nyc|la|shop|store|tickets|party|bar|art|studio|world|fun|space|online|tech" +
+  // Cheap endings that scam links favor, caught even with a short name ("ev.top/x").
+  "|top|vip|cc|click|monster|icu|cyou|tk|cf|ml|ga|gq";
 
 // Any other 2-24 letter ending counts too (evil.top, evil.vip), as long as the name before it
 // has 3+ letters and the ending isn't code or a file type, so "st.louis", "dr.dre" and "node.js" pass.
 const NOT_TLD = "js|jk|ts|py|md|txt|png|jpg|jpeg|gif|pdf|html|css|json|heic|mov|mp4|mp3";
 
 export const LINK = new RegExp(
-  `\\b[a-z][\\w+.-]*://[^\\s<>"]+|(?<![\\w:])//[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|` +
-    // A path makes any short name a link ("ev.top/x"); without one, only the endings below count.
-    `(?<![\\w-])(?:[a-z0-9-]+\\.)+(?!(?:${NOT_TLD})\\b)[a-z]{2,24}/[^\\s<>"]*|` +
+  `\\b(?:(?:https?|hxxps?|ftps?|sftp|wss?|file|data|javascript)://|[a-z][a-z0-9+.-]*://(?=[^\\s<>"/]*\\.[a-z0-9]{2,}))[^\\s<>"]+|(?<![\\w:])//[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|` +
     `(?<![\\w-])(?:(?:[a-z0-9-]+\\.)+(?:${TLDS})|(?:[a-z0-9-]+\\.)*[a-z0-9-]{3,}\\.(?:co\\.|com\\.)?(?!(?:${NOT_TLD})\\b)[a-z]{2,24})` +
     `(?![\\w-]|\\.\\w)(?:/[^\\s<>"]*)?`,
   "gi",

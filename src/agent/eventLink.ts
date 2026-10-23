@@ -112,9 +112,12 @@ export function describeWhen(startsAt: string, endsAt: string | null, now = Date
   }
   const h = +hour % 12 || 12;
   const time = `${h}${minute === "00" ? "" : `:${minute}`}${+hour < 12 ? "am" : "pm"}`;
-  // No end listed: assume it runs a few hours, so an event under way isn't called over.
-  const end = endsAt ? Date.parse(endsAt) : Date.parse(startsAt) + 6 * 3600_000;
-  return { when: `${date} ${time}`, timeKnown: true, past: end < now };
+  // "10 PM - 2 AM" can come back with the end on the start's day, so an end at or before the start is the next morning.
+  // With no end, or a short one, assume it runs a few hours so an event under way isn't called over.
+  const start = Date.parse(startsAt);
+  let end = endsAt ? Date.parse(endsAt) : start;
+  if (endsAt && end <= start) end += 24 * 3600_000;
+  return { when: `${date} ${time}`, timeKnown: true, past: Math.max(end, start + 6 * 3600_000) < now };
 }
 
 /** Haiku's read of the page, or null when the page isn't an event. */

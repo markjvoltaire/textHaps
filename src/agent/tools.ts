@@ -145,12 +145,13 @@ function asStringArray(value: unknown): string[] | undefined {
   return tags.length > 0 ? tags : undefined;
 }
 
-/** Whether every word of `value` is in what the user wrote, so a page can't pick their city, name, or taste. */
-function saidByUser(value: string, session: ToolSession): boolean {
-  const said = session.userText.toLowerCase();
-  const lower = value.toLowerCase();
-  const words = lower.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 3);
-  return words.length === 0 ? said.includes(lower) : words.every((word) => said.includes(word));
+const plain = (text: string) => ` ${text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
+
+/** Whether the event page says `value` and the user never did, so a page can't pick their city, name, or taste. */
+function plantedByPage(value: string, session: ToolSession): boolean {
+  if (!session.pageText) return false;
+  const wanted = plain(value);
+  return plain(session.pageText).includes(wanted) && !plain(session.userText).includes(wanted);
 }
 
 function isTasteKind(value: unknown): value is TasteKind {
@@ -171,6 +172,8 @@ export type ToolSession = {
   userMessage: string;
   /** Event pages read this reply, by normalized url, so the same link is read once and reads stay capped. */
   eventReads: Map<string, Promise<EventDetails | null>>;
+  /** Text of the event fields read_event_link returned this reply; empty until a page is read. */
+  pageText: string;
   /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
   storedText: string;
   /** Untrusted content (search results, scraped listings) was seen this reply, so links get filtered. Images set it too. */
@@ -226,6 +229,7 @@ export async function runTool(
       if (!event?.starts_at) {
         return { error: "unreadable", hint: "Ask them for the day, time, and place." };
       }
+      session.pageText += `\n${[event.title, event.venue, event.address, event.price_note].filter(Boolean).join("\n")}`;
       const when = describeWhen(event.starts_at, event.ends_at);
       if (when.past) {
         return {
@@ -293,8 +297,8 @@ export async function runTool(
       if (session.untrusted && hasLink(asString(input.label)!)) {
         return { error: "link_in_label", hint: "Labels are short taste words, not links." };
       }
-      if (session.untrusted && !saidByUser(asString(input.label)!, session)) {
-        return { error: "not_from_user", hint: "Only save tastes the user said themselves." };
+      if (plantedByPage(asString(input.label)!, session)) {
+        return { error: "not_from_user", hint: "That came from the event page. Only save tastes the user said themselves." };
       }
       const signal = await rememberTaste({
         profileId: profile.id,
@@ -339,8 +343,8 @@ export async function runTool(
       if (!name && !city) {
         return { error: "nothing_to_update" };
       }
-      if (session.untrusted && [name, city].some((value) => value && !saidByUser(value, session))) {
-        return { error: "not_from_user", hint: "Only use a name or city the user said themselves." };
+      if ([name, city].some((value) => value && plantedByPage(value, session))) {
+        return { error: "not_from_user", hint: "That came from the event page. Only use a name or city the user said themselves." };
       }
       const updated = await updateProfile(profile.id, {
         ...(name ? { name } : {}),

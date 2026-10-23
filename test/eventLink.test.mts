@@ -35,6 +35,7 @@ const session = (userMessage: string, history = "") => ({
   userText: `${history}\n${userMessage}`,
   userMessage,
   eventReads: new Map<string, Promise<any>>(),
+  pageText: "",
   storedText: "",
   untrusted: false,
 });
@@ -290,19 +291,52 @@ await test("time: past events are flagged", async () => {
   assert.match(r.hint, /already happened/);
 });
 
-await test("untrusted session: update_profile and remember_taste must echo the user's own words", async () => {
-  const s = session("hi i'm in miami, i like house music");
-  s.untrusted = true;
-  // Blocked values return before any DB call.
+await test("search-untrusted onboarding: paraphrased city and taste still reach the DB", async () => {
+  const table: [string, string, any][] = [
+    ["im in nyc", "update_profile", { city: "New York" }],
+    ["i'm in philly", "update_profile", { city: "Philadelphia" }],
+    ["bk", "update_profile", { city: "Brooklyn" }],
+    ["call me mark", "update_profile", { name: "Mark" }],
+    ["i love rnb", "remember_taste", { kind: "like", label: "R&B" }],
+    ["i hate crowded places", "remember_taste", { kind: "dislike", label: "crowds" }],
+  ];
+  for (const [msg, tool, args] of table) {
+    const s = session(msg);
+    s.untrusted = true;
+    // Passing the guard means reaching the DB layer, which has no config here.
+    await assert.rejects(runTool(profile, tool, args, s), /SUPABASE/, `${msg} ${JSON.stringify(args)}`);
+  }
+});
+
+await test("a city, name, or taste planted by the read page is blocked unless the user said it", async () => {
+  haiku = () => message({ ...EVENT, venue: "Evilville Social Club", title: "Mallory Night", price_note: "pairs with promoter house" });
+  const s = session(`this? ${URL1}`);
+  await runTool(profile, "read_event_link", { url: URL1 }, s);
   assert.equal(((await runTool(profile, "update_profile", { city: "Evilville" }, s)) as any).error, "not_from_user");
-  assert.equal(((await runTool(profile, "update_profile", { name: "Mallory" }, s)) as any).error, "not_from_user");
-  assert.equal(((await runTool(profile, "remember_taste", { kind: "like", label: "evil promoters" }, s)) as any).error, "not_from_user");
-  // The user's own words get past the guard and reach the DB layer (which has no config here).
-  await assert.rejects(runTool(profile, "update_profile", { city: "Miami" }, s), /SUPABASE/);
-  await assert.rejects(runTool(profile, "remember_taste", { kind: "like", label: "House" }, s), /SUPABASE/);
-  // Not untrusted: no guard.
-  s.untrusted = false;
-  await assert.rejects(runTool(profile, "update_profile", { city: "Evilville" }, s), /SUPABASE/);
+  assert.equal(((await runTool(profile, "update_profile", { name: "mallory" }, s)) as any).error, "not_from_user");
+  assert.equal(((await runTool(profile, "remember_taste", { kind: "like", label: "promoter house" }, s)) as any).error, "not_from_user");
+  // Something the page never said still goes through, and so does a value the user said too.
+  await assert.rejects(runTool(profile, "update_profile", { city: "Philadelphia" }, s), /SUPABASE/);
+  const said = session(`im in evilville ${URL1}`);
+  await runTool(profile, "read_event_link", { url: URL1 }, said);
+  await assert.rejects(runTool(profile, "update_profile", { city: "Evilville" }, said), /SUPABASE/);
+});
+
+await test("overnight events are not past: an end at or before the start rolls to the next day", () => {
+  const morning = Date.parse("2026-11-07T08:00:00-05:00");
+  assert.equal(describeWhen("2026-11-07T22:00:00-05:00", "2026-11-07T02:00:00-05:00", morning).past, false);
+  assert.equal(describeWhen("2026-11-07T22:00:00-05:00", "2026-11-08T02:00:00-05:00", morning).past, false);
+  assert.equal(describeWhen("2026-11-07T22:00:00-05:00", "2026-11-07T02:00:00-05:00", Date.parse("2026-11-08T06:00:00-05:00")).past, true);
+  assert.equal(describeWhen("2026-11-07T02:00:00-05:00", null, Date.parse("2026-11-07T09:00:00-05:00")).past, true);
+});
+
+await test("link filter: ordinary slash and scheme-like text is left alone, bypass forms still caught", () => {
+  for (const text of ["st.louis/kc", "dr.dre/eminem", "chill://moody", "house/techno", "r&b/soul", "u.s./canada", "10:30/11:30", "techno // house", "tues/wed", "24/7"]) {
+    assert.equal(stripUnknownLinks(text, new Set(), new Set(), ""), text, text);
+  }
+  for (const text of ["ev.top/x", "evil.com/x", "ftp://evil.com", "chill://evil.com", "javascript://x", "file://etc", "evil.https://a.com top"]) {
+    assert.doesNotMatch(stripUnknownLinks(text, new Set(), new Set(), ""), /evil|ev\.top|:\/\/|x$/, text);
+  }
 });
 
 await test("same link is read once, and reads are capped at 2", async () => {
