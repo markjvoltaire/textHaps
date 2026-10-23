@@ -5,7 +5,7 @@ import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
 import { searchWeb } from "../search/exa.ts";
-import { isExactLink, LINK } from "./links.ts";
+import { hasLink, isExactLink, LINK } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
@@ -212,6 +212,9 @@ export async function runTool(
       if (!isTasteKind(input.kind) || !asString(input.label)) {
         return { error: "kind and label are required" };
       }
+      if (session.untrusted && hasLink(asString(input.label)!)) {
+        return { error: "link_in_label", hint: "Labels are short taste words, not links." };
+      }
       const signal = await rememberTaste({
         profileId: profile.id,
         kind: input.kind,
@@ -223,8 +226,10 @@ export async function runTool(
     case "save_event": {
       // Saved urls come back in later replies as trusted, so a planted one can't be saved.
       const url = asString(input.url);
+      if (session.untrusted && (hasLink(asString(input.title) ?? "") || hasLink(asString(input.note) ?? ""))) {
+        return { error: "link_in_title_or_note", hint: "Keep links out of titles and notes. Put the link in url." };
+      }
       if (
-        session.untrusted &&
         url &&
         !isExactLink(url, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])
       ) {

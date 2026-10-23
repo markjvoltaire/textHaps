@@ -1,10 +1,17 @@
 // Bare domains (no scheme, no www) are caught only on these endings, so "u.s.", "node.js" and "lol.jk" pass.
-const TLDS = "com|net|org|io|co|app|ly|me|gg|xyz|link|site|info|biz|us|tv|to|ai|so|page|events|club";
+const TLDS =
+  "com|net|org|io|co|app|ly|me|gg|xyz|link|site|info|biz|us|tv|to|ai|so|page|events|club" +
+  "|(?:co\\.|com\\.)?(?:uk|ca|de|fr|es|it|nl|au|br|mx|jp)" +
+  "|live|fm|nyc|la|shop|store|tickets|party|bar|art|studio|world|fun|space|online|tech";
 
 export const LINK = new RegExp(
   `\\bhttps?://[^\\s<>"]+|\\bwww\\.[^\\s<>"]+|(?<![\\w@./-])(?:[a-z0-9-]+\\.)+(?:${TLDS})(?![\\w-]|\\.\\w)(?:/[^\\s<>"]*)?`,
   "gi",
 );
+
+export function hasLink(text: string): boolean {
+  return (text.match(LINK) ?? []).length > 0;
+}
 
 const TRAILING = /[).,!?;:'"]+$/;
 

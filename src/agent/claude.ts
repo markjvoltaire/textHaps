@@ -6,7 +6,7 @@ import type { EventRow, Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import { formatSave } from "../db/saves.ts";
 import { formatError } from "../utils/text.ts";
-import { stripUnknownLinks } from "./links.ts";
+import { hasLink, stripUnknownLinks } from "./links.ts";
 import { HAPS_TOOLS, runTool, type ToolSession } from "./tools.ts";
 
 export type AgentReply = {
@@ -100,7 +100,17 @@ export async function generateReply(input: {
     ...input.history.map((turn) => ({ role: turn.role, content: turn.content })),
     { role: "user" as const, content: input.userMessage },
   ];
-  const session: ToolSession = { searched: [], webSearches: 0, webUrls: new Set(), savedUrls: new Set(), untrusted: false, userText };
+  // Taste labels and saves are stored text that went into the prompt, so a link planted in
+  // one earlier can come back in this reply even with no lookup. Filter whenever one is there.
+  const stored = [...input.taste.map((signal) => signal.label), ...input.saves.map(formatSave)].join("\n");
+  const session: ToolSession = {
+    searched: [],
+    webSearches: 0,
+    webUrls: new Set(),
+    savedUrls: new Set(),
+    untrusted: hasLink(stored),
+    userText,
+  };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then
   // remember_taste), so that text is kept too. finish() decides how it joins the final turn.
   const written: string[] = [];
@@ -162,9 +172,14 @@ export async function generateReply(input: {
       return finish(restates ? [text] : [...written, text], session);
     }
 
-    // A lookup means the real answer comes after it, so chatter written before it ("bet,
-    // brooklyn it is") is dropped rather than pushing the recs out of the 3 bubbles.
-    if (toolNames.some(isLookup)) written.length = 0;
+    // A lookup means the real answer comes after it, so one-line chatter written before it
+    // ("bet, brooklyn it is") is dropped rather than pushing the recs out of the 3 bubbles.
+    // Multi-line entries are earlier recs and stay.
+    if (toolNames.some(isLookup)) {
+      const kept = written.filter((entry) => lines(entry).length > 1);
+      written.length = 0;
+      written.push(...kept);
+    }
     if (text && !narration) written.push(text);
     messages.push({ role: "assistant", content: response.content });
 
