@@ -12,8 +12,20 @@ type ExaResponse = {
   results?: { title?: string; url: string; publishedDate?: string; highlights?: string[] }[];
 };
 
-/** Ranked web results for places (bars, restaurants). Parties stay on search_events. */
+/** Ranked web results for places (bars, restaurants). */
 export async function searchWeb(query: string): Promise<WebResult[]> {
+  return exaSearch({ query, numResults: 5 });
+}
+
+// Where nights get listed. Exa can't read Posh pages well, but their titles and dates still show up.
+const EVENT_DOMAINS = ["dice.fm", "posh.vip", "partiful.com", "eventbrite.com", "ra.co", "shotgun.live", "lu.ma"];
+
+/** Live event pages from ticketing sites, for search_events. */
+export async function searchEventPages(query: string): Promise<WebResult[]> {
+  return exaSearch({ query, numResults: 8, includeDomains: EVENT_DOMAINS });
+}
+
+async function exaSearch(options: { query: string; numResults: number; includeDomains?: string[] }): Promise<WebResult[]> {
   const token = process.env.EXA_API_KEY;
   if (!token) throw new Error("EXA_API_KEY missing");
 
@@ -24,10 +36,9 @@ export async function searchWeb(query: string): Promise<WebResult[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      query,
+      ...options,
       // lite is Exa's fastest mode (~450ms); highlights are the parts of each page that match the query.
       type: "lite",
-      numResults: 5,
       userLocation: "US",
       contents: { highlights: true },
     }),

@@ -120,5 +120,6 @@ function formatTaste(taste: TasteSignal[] | undefined): string {
   const likes = taste.filter((item) => item.kind === "like").map((item) => item.label);
   const dislikes = taste.filter((item) => item.kind === "dislike").map((item) => item.label);
   const constraints = taste.filter((item) => item.kind === "constraint").map((item) => item.label);
-  return `Likes: ${likes.join(", ") || "none"}. Avoid: ${dislikes.join(", ") || "none"}. Constraints: ${constraints.join(", ") || "none"}.`;
+  // Saved taste can be stale; the ask is what they want now.
+  return `Saved taste, which the ask wins over when they differ. Likes: ${likes.join(", ") || "none"}. Avoid: ${dislikes.join(", ") || "none"}. Constraints: ${constraints.join(", ") || "none"}.`;
 }

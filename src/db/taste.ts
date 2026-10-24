@@ -35,10 +35,23 @@ export async function rememberTaste(input: {
 
   if (lookupError) throw lookupError;
 
+  // Tastes change: liking something now replaces disliking it before, and the other way round.
+  const opposite: TasteKind | null = input.kind === "like" ? "dislike" : input.kind === "dislike" ? "like" : null;
+  if (opposite) {
+    const { error } = await sb
+      .from("taste_signals")
+      .delete()
+      .eq("profile_id", input.profileId)
+      .eq("kind", opposite)
+      .ilike("label", label);
+    if (error) throw error;
+  }
+
   if (existing) {
+    // created_at doubles as "last said", so a taste said again counts as fresh.
     const { data, error } = await sb
       .from("taste_signals")
-      .update({ weight, source })
+      .update({ weight, source, created_at: new Date().toISOString() })
       .eq("id", (existing as TasteSignal).id)
       .select("*")
       .single();
@@ -60,4 +73,17 @@ export async function rememberTaste(input: {
 
   if (error) throw error;
   return data as TasteSignal;
+}
+
+/** Drops a taste they've moved on from, whatever kind it was saved as. Returns what was removed. */
+export async function forgetTaste(profileId: string, label: string): Promise<TasteSignal[]> {
+  const { data, error } = await getSupabase()
+    .from("taste_signals")
+    .delete()
+    .eq("profile_id", profileId)
+    .ilike("label", label.trim())
+    .select("*");
+
+  if (error) throw error;
+  return (data ?? []) as TasteSignal[];
 }
