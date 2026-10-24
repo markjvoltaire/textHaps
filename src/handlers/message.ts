@@ -8,7 +8,7 @@ import { generateReply } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
-import { markBackgroundSet, markContactCardSent, upsertProfile } from "../db/profiles.ts";
+import { markBackgroundCleared, markContactCardSent, upsertProfile } from "../db/profiles.ts";
 import type { Profile } from "../db/types.ts";
 import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
@@ -49,18 +49,17 @@ function audioOf(content: Message["content"]): Audio | undefined {
   return undefined;
 }
 const ASSETS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "assets");
-const BACKGROUND_PATH = join(ASSETS_DIR, "haps-bg.jpg");
 const ICON_PATH = join(ASSETS_DIR, "haps-icon.jpg");
 
-/** Sets the Haps chat background once per person. A failure never blocks the reply. */
-async function ensureBackground(space: Space, profile: Profile): Promise<void> {
-  if (profile.platform !== "imessage" || profile.background_set_at) return;
+/** Clears the Haps chat background from threads that got one earlier. A failure never blocks the reply. */
+async function clearBackground(space: Space, profile: Profile): Promise<void> {
+  if (profile.platform !== "imessage" || !profile.background_set_at) return;
   try {
-    await traced("background", () => space.send(background(BACKGROUND_PATH)));
-    await markBackgroundSet(profile.id);
-    console.log(`[background] set for sender=${profile.platform_user_id}`);
+    await traced("clear background", () => space.send(background("clear")));
+    await markBackgroundCleared(profile.id);
+    console.log(`[background] cleared for sender=${profile.platform_user_id}`);
   } catch (err) {
-    console.warn(`[background] failed for sender=${profile.platform_user_id}:`, formatError(err));
+    console.warn(`[background] clear failed for sender=${profile.platform_user_id}:`, formatError(err));
   }
 }
 
@@ -176,8 +175,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         .startTyping()
         .catch((err: unknown) => console.warn(`[searching] typing failed for sender=${senderId}:`, formatError(err)));
     };
-    // Sent while Claude works rather than before it; it still lands before the first bubble.
-    const backgroundSet = ensureBackground(space, profile);
+    // Runs while Claude works, so it doesn't hold up the reply.
+    const backgroundCleared = clearBackground(space, profile);
     try {
       const [taste, saves, history] = await Promise.all([
         listTaste(profile.id),
@@ -199,12 +198,12 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
       span.update({ level: "ERROR", statusMessage: formatError(err) });
       // Let typing start first so the dots don't linger after the glitch message.
-      await Promise.all([backgroundSet, searchingNotice]);
+      await Promise.all([backgroundCleared, searchingNotice]);
       await space.send(FALLBACK_REPLY);
       return;
     }
 
-    await backgroundSet;
+    await backgroundCleared;
     if (!reply) {
       console.warn(`[claude] empty reply for sender=${senderId}`);
       // They watched the typing dots through a search, so don't leave them hanging.

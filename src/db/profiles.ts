@@ -72,10 +72,10 @@ export function applyProfileUpdate(profile: Profile, updated: Profile): void {
   profile.city = updated.city;
 }
 
-export async function markBackgroundSet(profileId: string): Promise<void> {
+export async function markBackgroundCleared(profileId: string): Promise<void> {
   const { error } = await getSupabase()
     .from("profiles")
-    .update({ background_set_at: new Date().toISOString() })
+    .update({ background_set_at: null })
     .eq("id", profileId);
 
   if (error) throw error;
