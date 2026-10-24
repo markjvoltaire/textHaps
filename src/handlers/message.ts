@@ -25,6 +25,7 @@ const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const AUDIO_READ_TIMEOUT_MS = 10_000;
 // A reply line that is nothing but a link, sent as a rich link card.
 const BARE_URL = /^https?:\/\/\S+$/i;
+const RICHLINK_TIMEOUT_MS = 6_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -228,8 +229,13 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const second = flyers[1];
     const photos = first && second ? group(first, second, ...flyers.slice(2)) : first;
     // The place's card leads, so the answer reads as notes on the place it shows.
+    // Photon builds the preview before confirming, which once took 30s and then failed. The card
+    // is extra, so a slow or failed one never holds up or drops the answer; it's not retried,
+    // since it may still land.
     if (link) {
-      await space.send(richlink(link));
+      await withTimeout(space.send(richlink(link)), RICHLINK_TIMEOUT_MS, "rich link").catch((err: unknown) =>
+        console.warn(`[richlink] send failed for sender=${senderId}, sending the text anyway:`, formatError(err)),
+      );
       if (lead || photos) await new Promise((resolve) => setTimeout(resolve, 900));
     }
     if (photos && lead) {
