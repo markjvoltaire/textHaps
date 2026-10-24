@@ -4,6 +4,7 @@ import type { OnboardingField, Profile, TasteSignal } from "./types.ts";
 export type ProfilePatch = {
   name?: string;
   city?: string;
+  area?: string;
   email?: string;
   full_name?: string;
 };
@@ -72,6 +73,7 @@ export function isOnboarded(profile: Profile, taste: TasteSignal[]): boolean {
 export function applyProfileUpdate(profile: Profile, updated: Profile): void {
   profile.name = updated.name;
   profile.city = updated.city;
+  profile.area = updated.area;
   profile.email = updated.email;
   profile.full_name = updated.full_name;
 }

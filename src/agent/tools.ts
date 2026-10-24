@@ -19,6 +19,10 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
       type: "object",
       properties: {
         query: { type: "string", description: "What to look for, with the city and neighborhood, e.g. natural wine bar brooklyn" },
+        live: {
+          type: "boolean",
+          description: "Search the live web instead of Haps's recs. Only after the recs came back with nothing near them or in their budget.",
+        },
       },
       required: ["query"],
       additionalProperties: false,
@@ -110,13 +114,17 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "update_profile",
     description:
-      "Save their city, name, full name, or email. Call it for city or name whenever they mention them. Only save an email after you repeated it back and they said it's right.",
+      "Save their city, area, name, full name, or email. Call it for city or name whenever they mention them. Only save an email after you repeated it back and they said it's right.",
     input_schema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Their first name or what they go by" },
         full_name: { type: "string", description: "Their first and last name" },
         city: { type: "string", description: "City they are in, e.g. NYC" },
+        area: {
+          type: "string",
+          description: "The part of town they live in or usually head out from, e.g. north miami or brickell. Not where they happen to be for one night.",
+        },
         email: { type: "string", description: "Their email, only once they confirmed it" },
       },
       additionalProperties: false,
@@ -242,13 +250,13 @@ export async function runTool(
       session.webSearches += 1;
       // A city with a recs list is searched from it. A search naming another city still goes to the web.
       const metro = knownMetro(query) ?? (profile.city ? metroFor(profile.city) : null);
-      if (metro && RECS_METROS.has(metro)) {
+      if (metro && RECS_METROS.has(metro) && input.live !== true) {
         const recs = await searchRecs(query, metro);
         keepRecLinks(recs, session);
         return {
           count: recs.length,
           haps_recs: recs,
-          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If your answer is about one place that has a url, end with that url alone on the last line.",
+          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If none is near where they are or in their budget, call web_search again with live: true instead of sending one that's far. If your answer is about one place that has a url, end with that url alone on the last line.",
         };
       }
       session.untrusted = true;
@@ -424,15 +432,16 @@ export async function runTool(
     case "update_profile": {
       const name = asString(input.name);
       const city = asString(input.city);
+      const area = asString(input.area)?.trim().toLowerCase();
       const email = asString(input.email)?.trim().toLowerCase();
       const fullName = asString(input.full_name)?.trim().replace(/\s+/g, " ");
-      if (!name && !city && !email && !fullName) {
+      if (!name && !city && !area && !email && !fullName) {
         return { error: "nothing_to_update" };
       }
       if (fullName && fullName.split(" ").length < 2) {
         return { error: "need_last_name", hint: "That's one name. Ask for their first and last name." };
       }
-      if ([name, city, email, fullName].some((value) => value && plantedByPage(value, session))) {
+      if ([name, city, area, email, fullName].some((value) => value && plantedByPage(value, session))) {
         return { error: "not_from_user", hint: "That came from the event page. Only use what the user said themselves." };
       }
       if (email) {
@@ -445,11 +454,12 @@ export async function runTool(
       const updated = await updateProfile(profile.id, {
         ...(name ? { name } : {}),
         ...(city ? { city } : {}),
+        ...(area ? { area } : {}),
         ...(email ? { email } : {}),
         ...(fullName ? { full_name: fullName } : {}),
       });
       applyProfileUpdate(profile, updated);
-      return { name: updated.name, full_name: updated.full_name, city: updated.city, email: updated.email };
+      return { name: updated.name, full_name: updated.full_name, city: updated.city, area: updated.area, email: updated.email };
     }
     default:
       return { error: `unknown tool ${name}` };

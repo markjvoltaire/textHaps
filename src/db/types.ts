@@ -10,6 +10,8 @@ export type Profile = {
   name: string | null;
   date_of_birth: string | null;
   city: string | null;
+  /** The part of town they live in or usually head out from, e.g. "north miami". */
+  area: string | null;
   email: string | null;
   /** First and last name for RSVPs; name stays what they go by. */
   full_name: string | null;
