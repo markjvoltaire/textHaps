@@ -41,7 +41,7 @@ export async function saveEvent(input: {
     if (existing) return existing as SaveRow;
 
     const listing = await getListing(input.listingId);
-    if (!listing) throw new Error(`no listing ${input.listingId}, use an id from search_events`);
+    if (!listing) throw new Error(`no listing ${input.listingId}, save it by url instead`);
     const { data, error } = await sb
       .from("saves")
       .insert({

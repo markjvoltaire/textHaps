@@ -4,6 +4,7 @@ import { listSaves, saveEvent } from "../db/saves.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
 import { searchEventPages, searchWeb, type WebResult } from "../search/exa.ts";
+import { searchTikTokVideos } from "../search/monid.ts";
 import { describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
 import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
@@ -37,7 +38,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "search_events",
     description:
-      "Search ticketing sites (DICE, Posh, Partiful, Eventbrite, RA, Shotgun, Luma) live for nights in this city. Recommend only events these pages back up, with the date the page shows. Do not invent events. Do not call until you know their taste and city.",
+      "Search ticketing sites (DICE, Posh, Partiful, Eventbrite, RA, Shotgun, Luma) and recent TikTok promo videos live for nights in this city. Recommend only events these pages back up, with the date the page shows. Do not invent events. Do not call until you know their taste and city.",
     input_schema: {
       type: "object",
       properties: {
@@ -84,12 +85,12 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "save_event",
-    description: "Save an event from search_events or a URL the user sent so Haps can remember it later.",
+    description: "Save an event so Haps can remember it later. Pass its page url from search_events, or a link the user sent.",
     input_schema: {
       type: "object",
       properties: {
-        event_id: { type: "string", description: "Event id from search_events" },
-        url: { type: "string", description: "A link the user shared that is not in the catalog" },
+        event_id: { type: "string", description: "Listing id from the events catalog. search_events results have none, so use url for those." },
+        url: { type: "string", description: "The event's page url from search_events, or a link the user sent" },
         title: { type: "string" },
         note: { type: "string" },
       },
@@ -124,17 +125,23 @@ type ToolInput = Record<string, unknown>;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Same zone as the prompt's date, so a Friday 8pm start isn't searched as Saturday.
+const LOCAL_DAY = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "long", day: "numeric" });
+const LOCAL_YEAR = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric" });
+
 /** The asked window as words a search engine matches on event pages, e.g. "October 24 or October 25 2026". */
 function windowWords(from: string | undefined, to: string | undefined): string {
   const start = Date.parse(from ?? "") || Date.now();
   const end = Date.parse(to ?? "");
   // Pages say the date in words, so a long or open window just asks for what's coming up.
   if (!end || end < start || end - start > 7 * DAY_MS) return "upcoming";
+  const lastDay = LOCAL_DAY.format(end);
   const days: string[] = [];
-  for (let day = start; day <= end; day += DAY_MS) {
-    days.push(new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "long", day: "numeric" }).format(day));
+  for (let day = start; days.length <= 8; day += DAY_MS) {
+    days.push(LOCAL_DAY.format(day));
+    if (days.at(-1) === lastDay) break;
   }
-  const year = new Date(start).getUTCFullYear();
+  const year = LOCAL_YEAR.format(start);
   return days.length === 1 ? `on ${days[0]} ${year}` : `on ${days.slice(0, -1).join(", ")} or ${days.at(-1)} ${year}`;
 }
 
@@ -298,14 +305,24 @@ export async function runTool(
       }
       session.webSearches += 1;
       // Live from ticketing sites for now, not the ingested listings table, which went stale.
-      const vibe = [asString(input.query), ...(asStringArray(input.tags) ?? [])].filter(Boolean).join(" ") || "party";
-      const pages = await searchEventPages(`${vibe} events in ${city} ${windowWords(asString(input.from), asString(input.to))}`);
-      // Event pages can be sent as links or saved, so they count as found by a search.
+      const tags = asStringArray(input.tags);
+      const vibe = [asString(input.query), ...(tags ?? [])].filter(Boolean).join(" ") || "party";
+      // TikTok is extra: if Monid is down or slow, answer from the ticketing pages alone.
+      const [pages, videos] = await Promise.all([
+        searchEventPages(`${vibe} events in ${city} ${windowWords(asString(input.from), asString(input.to))}`),
+        searchTikTokVideos(`${vibe} ${city}`).catch((err: unknown) => {
+          console.warn(`[tiktok] search failed: ${err instanceof Error ? err.message : String(err)}`);
+          return [];
+        }),
+      ]);
+      // Event pages and videos can be sent as links or saved, so they count as found by a search.
       for (const page of pages) session.webUrls.add(page.url);
+      for (const video of videos) session.webUrls.add(video.url);
       return {
-        count: pages.length,
+        count: pages.length + videos.length,
         untrusted_event_pages: pages,
-        hint: "Each is an event's web page. Only recommend ones whose page shows a date inside the window they asked about and a place in or near their city, and give the day and time as the page shows it. Skip any without a clear date. For one event, end with its page url alone on the last line.",
+        untrusted_tiktok_videos: videos,
+        hint: "Event pages are ticketing listings. TikTok videos are recent promo clips and weekend guides, and many are for other cities, past nights, or not nights out at all, so skip those. Only recommend ones that show a date inside the window they asked about and a place in or near their city, and give the day and time as shown. Skip any without a clear date. For one event, end with its page or video url alone on the last line.",
       };
     }
     case "remember_taste": {
