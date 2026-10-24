@@ -209,7 +209,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
     // Only commit the exchange once the model actually produced something.
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
-    // only a link goes out as one rich link card after them, so it doesn't take a text slot.
+    // only a link goes out as one rich link card before them, so it doesn't take a text slot.
     const lines = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean);
     // Haps's own link line wins; otherwise the one place's site picked from the search results.
     const link = lines.find((line) => BARE_URL.test(line)) ?? placeLink ?? undefined;
@@ -227,6 +227,11 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const first = flyers[0];
     const second = flyers[1];
     const photos = first && second ? group(first, second, ...flyers.slice(2)) : first;
+    // The place's card leads, so the answer reads as notes on the place it shows.
+    if (link) {
+      await space.send(richlink(link));
+      if (lead || photos) await new Promise((resolve) => setTimeout(resolve, 900));
+    }
     if (photos && lead) {
       await space.send(photos, lead);
     } else if (photos) {
@@ -237,10 +242,6 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     for (const bubble of rest.slice(0, 2)) {
       await new Promise((resolve) => setTimeout(resolve, 900));
       await space.send(bubble);
-    }
-    if (link) {
-      if (lead || first) await new Promise((resolve) => setTimeout(resolve, 900));
-      await space.send(richlink(link));
     }
     // After the first reply, not before it, so the chat opens with Haps talking.
     await ensureContactCard(space, profile);
