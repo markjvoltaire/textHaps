@@ -212,7 +212,12 @@ export async function runTool(
       const results = (await searchWeb(query)).map((result) => (isExaPage(result.url) ? { ...result, url: "" } : result));
       for (const result of results) if (result.url) session.webUrls.add(result.url);
       // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.
-      return { count: results.length, untrusted_web_content: results };
+      // The prompt alone was skipped (a "barcelona in wynwood" reply came back with no link), so it's repeated next to the results.
+      return {
+        count: results.length,
+        untrusted_web_content: results,
+        hint: "If your answer is about one specific place, even to steer them away from it, end with that place's own website url from these results alone on the last line. Skip it if none of these is the place's own site.",
+      };
     }
     case "read_event_link": {
       const url = asString(input.url);
