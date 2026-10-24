@@ -31,6 +31,7 @@ const session = (userMessage: string, history = "") => ({
   searched: [],
   webSearches: 0,
   webUrls: new Set<string>(),
+  webResults: [] as any[],
   savedUrls: new Set<string>(),
   userText: `${history}\n${userMessage}`,
   userMessage,

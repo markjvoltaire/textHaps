@@ -7,12 +7,15 @@ import type { ChatTurn } from "../memory/history.ts";
 import { formatSave } from "../db/saves.ts";
 import { formatError } from "../utils/text.ts";
 import { bareLinks, hasLink, stripUnknownLinks } from "./links.ts";
+import { placeLinkFor } from "./placeLink.ts";
 import { HAPS_TOOLS, runTool, type ToolSession } from "./tools.ts";
 
 export type AgentReply = {
   text: string;
   imagePaths: string[];
   events: EventRow[];
+  /** The one place's own site when the reply is about a single place from web_search, sent as a card. */
+  placeLink: string | null;
 };
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -116,6 +119,7 @@ export async function generateReply(input: {
     searched: [],
     webSearches: 0,
     webUrls: new Set(),
+    webResults: [],
     savedUrls: new Set(input.saves.flatMap((save) => [save.url, save.listing?.url].filter((url): url is string => !!url))),
     untrusted: hasLink(stored, true),
     userText,
@@ -246,10 +250,15 @@ function finish(parts: string[], session: ToolSession): AgentReply {
     })
     .filter(Boolean)
     .join("\n");
+  // Images count as untrusted too (set where they're read), since text inside them can plant links.
+  const filtered = session.untrusted
+    ? stripUnknownLinks(text, session.webUrls, session.savedUrls, `${session.userText}\n${session.storedText}`)
+    : text;
   return {
-    // Images count as untrusted too (set where they're read), since text inside them can plant links.
-    text: session.untrusted ? stripUnknownLinks(text, session.webUrls, session.savedUrls, `${session.userText}\n${session.storedText}`) : text,
+    text: filtered,
     imagePaths: eventFlyers(session.searched),
     events: session.searched,
+    // Picked here rather than left to the model, which skipped the link when steering someone away from a place.
+    placeLink: session.webResults.length > 0 ? placeLinkFor(filtered, session.webResults) : null,
   };
 }

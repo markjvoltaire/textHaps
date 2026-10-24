@@ -164,6 +164,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     span.update({ input: text, metadata: { voice: Boolean(audio) } });
     let reply: string;
     let imagePaths: string[] = [];
+    let placeLink: string | null = null;
     // Web searches take a few seconds, so keep the typing dots going instead of texting a heads-up.
     let searchingNotice: Promise<void> | undefined;
     const onWebSearch = () => {
@@ -185,6 +186,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       // Typing must start before the answer lands, or the dots can linger after it.
       await searchingNotice;
       imagePaths = generated.imagePaths;
+      placeLink = generated.placeLink;
       reply = sanitizeOutgoingText(generated.text);
       if (!reply && imagePaths.length > 0) {
         reply = sanitizeOutgoingText(formatCatalogOverview(generated.events));
@@ -209,7 +211,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
     // only a link goes out as one rich link card after them, so it doesn't take a text slot.
     const lines = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean);
-    const link = lines.find((line) => BARE_URL.test(line));
+    // Haps's own link line wins; otherwise the one place's site picked from the search results.
+    const link = lines.find((line) => BARE_URL.test(line)) ?? placeLink ?? undefined;
     const bubbles = lines.filter((line) => !BARE_URL.test(line)).slice(0, 3);
     const sent = [...bubbles, ...(link ? [link] : [])].join("\n");
     span.update({ output: sent, metadata: { platform, flyers: imagePaths.length, richlink: Boolean(link) } });

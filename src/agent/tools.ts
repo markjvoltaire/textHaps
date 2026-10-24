@@ -4,7 +4,7 @@ import { applyProfileUpdate, updateProfile } from "../db/profiles.ts";
 import { listSaves, saveEvent } from "../db/saves.ts";
 import { listTaste, rememberTaste } from "../db/taste.ts";
 import type { EventRow, Profile, TasteKind } from "../db/types.ts";
-import { searchWeb } from "../search/exa.ts";
+import { searchWeb, type WebResult } from "../search/exa.ts";
 import { describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
 import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
@@ -164,6 +164,8 @@ export type ToolSession = {
   webSearches: number;
   /** Links web_search returned, the only page links a reply may pass on. */
   webUrls: Set<string>;
+  /** web_search results this reply, so the handler can attach the one place's own site as a card. */
+  webResults: WebResult[];
   /** Urls from the user's saves: exact matches only, not whole hosts. */
   savedUrls: Set<string>;
   /** The user's own text this reply (chat plus current message), the only other source of links. */
@@ -211,6 +213,7 @@ export async function runTool(
       // Exa's own place pages (exa.ai/library/...) are its index, not the venue's site, so they're never sent.
       const results = (await searchWeb(query)).map((result) => (isExaPage(result.url) ? { ...result, url: "" } : result));
       for (const result of results) if (result.url) session.webUrls.add(result.url);
+      session.webResults.push(...results.filter((result) => result.url));
       // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.
       // The prompt alone was skipped (a "barcelona in wynwood" reply came back with no link), so it's repeated next to the results.
       return {
