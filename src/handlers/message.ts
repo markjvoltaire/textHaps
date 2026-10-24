@@ -209,7 +209,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
     // Only commit the exchange once the model actually produced something.
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
-    // only a link goes out as one rich link card after them, so it doesn't take a text slot.
+    // only a link goes out as one rich link card before them, so it doesn't take a text slot.
     // The links note is only for history; if Claude copies one into a reply, it never goes out.
     const lines = reply
       .split(/\n+/)
@@ -218,7 +218,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // Haps's own link line wins; otherwise the one place's site picked from the search results.
     const link = lines.find((line) => BARE_URL.test(line)) ?? placeLink ?? undefined;
     const bubbles = lines.filter((line) => !BARE_URL.test(line)).slice(0, 3);
-    const sent = [...bubbles, ...(link ? [link] : [])].join("\n");
+    const sent = [...(link ? [link] : []), ...bubbles].join("\n");
     span.update({ output: sent, metadata: { platform, richlink: Boolean(link) } });
     // Event pages the reply named but didn't send, so a follow-up ("can you rsvp") can still send the link.
     const unsent = eventLinks.filter((item) => item.url !== link);
@@ -230,24 +230,24 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     });
 
     console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)}`);
+    // The place's card goes first so they see it, then the texts explain it. Photon builds the
+    // preview before confirming, which once took 30s and then failed, so it's capped to keep it
+    // from holding up the texts; it's not retried, since it may still land.
+    if (link) {
+      await withTimeout(traced("rich link", () => space.send(richlink(link))), RICHLINK_TIMEOUT_MS, "rich link").catch(
+        (err: unknown) => console.warn(`[richlink] send failed for sender=${senderId}:`, formatError(err)),
+      );
+    }
     // Short texts, not one block: each line goes out as its own bubble.
     const [lead, ...rest] = bubbles;
     // No pauses between bubbles: each send already takes a couple of seconds to confirm.
     if (lead) {
       await traced("lead", () => space.send(lead));
     }
-    // What the user actually waited for, from the message arriving to the first thing they see.
+    // What the user actually waited for, from the message arriving to the first text they see.
     span.update({ metadata: { firstBubbleMs: Date.now() - receivedAt } });
     for (const bubble of rest.slice(0, 2)) {
       await traced("bubble", () => space.send(bubble));
-    }
-    // The place's card goes last so it never holds up the answer. Photon builds the preview
-    // before confirming, which once took 30s and then failed, so it's capped; it's not retried,
-    // since it may still land.
-    if (link) {
-      await withTimeout(traced("rich link", () => space.send(richlink(link))), RICHLINK_TIMEOUT_MS, "rich link").catch(
-        (err: unknown) => console.warn(`[richlink] send failed for sender=${senderId}:`, formatError(err)),
-      );
     }
     // After the first reply, not before it, so the chat opens with Haps talking.
     await ensureContactCard(space, profile);
