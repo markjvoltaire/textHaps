@@ -109,17 +109,35 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "update_profile",
     description:
-      "Save their city (and name, if they offer it). Call this whenever they mention where they live or go out.",
+      "Save their city, name, or email. Call it for city or name whenever they mention them. Only save an email after you repeated it back and they said it's right.",
     input_schema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Their first name or what they go by" },
+        name: { type: "string", description: "Their first name or what they go by, or their full name if they gave it for an rsvp" },
         city: { type: "string", description: "City they are in, e.g. NYC" },
+        email: { type: "string", description: "Their email, only once they confirmed it" },
       },
       additionalProperties: false,
     },
   },
+  {
+    name: "rsvp_event",
+    description:
+      "RSVP them to a free Eventbrite event with their saved name and email. Only call it after they said yes to rsvping to that specific event in their own message. It runs in the background for about a minute and texts them when it's done.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The event's Eventbrite page url, from search_events, their saves, or a link they sent" },
+        title: { type: "string", description: "The event's name" },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
 ];
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+const EVENTBRITE_PAGE = /^https:\/\/(www\.)?eventbrite\.[a-z.]+\/e\//i;
 
 type ToolInput = Record<string, unknown>;
 
@@ -186,6 +204,10 @@ export type ToolSession = {
   savedUrls: Set<string>;
   /** The user's own text this reply (chat plus current message), the only other source of links. */
   userText: string;
+  /** The thread before this message. An email must show up here first, so it was repeated back and confirmed. */
+  earlierText: string;
+  /** Starts an RSVP in the background; the handler texts the result. Missing where no thread can be texted. */
+  startRsvp?: (url: string, title: string | undefined) => void;
   /** Just the message being answered, the only place read_event_link accepts a link from. */
   userMessage: string;
   /** Event pages read this reply, by normalized url, so the same link is read once and reads stay capped. */
@@ -388,18 +410,45 @@ export async function runTool(
     case "update_profile": {
       const name = asString(input.name);
       const city = asString(input.city);
-      if (!name && !city) {
+      const email = asString(input.email)?.trim().toLowerCase();
+      if (!name && !city && !email) {
         return { error: "nothing_to_update" };
       }
-      if ([name, city].some((value) => value && plantedByPage(value, session))) {
-        return { error: "not_from_user", hint: "That came from the event page. Only use a name or city the user said themselves." };
+      if ([name, city, email].some((value) => value && plantedByPage(value, session))) {
+        return { error: "not_from_user", hint: "That came from the event page. Only use what the user said themselves." };
+      }
+      if (email) {
+        if (!EMAIL.test(email)) return { error: "invalid_email", hint: "That doesn't look like an email. Ask them for it again." };
+        // It has to be in the thread already, so they saw it repeated back before this yes, and it can't come from a page.
+        if (!session.earlierText.toLowerCase().includes(email) || !session.userText.toLowerCase().includes(email)) {
+          return { error: "email_not_confirmed", hint: `Repeat it back ("${email}, that right?") and save it once they say yes.` };
+        }
       }
       const updated = await updateProfile(profile.id, {
         ...(name ? { name } : {}),
         ...(city ? { city } : {}),
+        ...(email ? { email } : {}),
       });
       applyProfileUpdate(profile, updated);
-      return { name: updated.name, city: updated.city };
+      return { name: updated.name, city: updated.city, email: updated.email };
+    }
+    case "rsvp_event": {
+      const url = asString(input.url);
+      if (!url || !EVENTBRITE_PAGE.test(url)) {
+        return { error: "not_eventbrite", hint: "Only free Eventbrite events for now. Send them the event's link so they can rsvp there." };
+      }
+      if (!isExactLink(url, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
+        return { error: "url_not_from_user_or_search", hint: "Only rsvp to a link the user sent, saved, or a search returned." };
+      }
+      if (!profile.email) {
+        return { error: "email_required", hint: "Ask for their email, repeat it back to confirm, save it with update_profile, then rsvp." };
+      }
+      if ((profile.name ?? "").trim().split(/\s+/).length < 2) {
+        return { error: "full_name_required", hint: "Eventbrite needs a first and last name. Ask for their full name and save it with update_profile." };
+      }
+      if (!session.startRsvp) return { error: "rsvp_unavailable", hint: "Send them the event's link so they can rsvp there." };
+      session.startRsvp(url, asString(input.title));
+      return { started: true, hint: "Tell them you're on it and you'll text when it's done. Don't say they're in yet." };
     }
     default:
       return { error: `unknown tool ${name}` };

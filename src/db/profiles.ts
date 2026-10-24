@@ -4,6 +4,7 @@ import type { OnboardingField, Profile, TasteSignal } from "./types.ts";
 export type ProfilePatch = {
   name?: string;
   city?: string;
+  email?: string;
 };
 
 export async function upsertProfile(platform: string, platformUserId: string): Promise<Profile> {

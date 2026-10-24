@@ -6,7 +6,7 @@ import { attachment, contact, group, richlink, type Message, type Space } from "
 import { background, nativeContactCard } from "spectrum-ts/providers/imessage";
 import { generateReply, LINKS_NOTE } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
-import { listSaves } from "../db/saves.ts";
+import { listSaves, saveEvent } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
 import { markBackgroundCleared, markContactCardSent, upsertProfile } from "../db/profiles.ts";
 import type { Profile } from "../db/types.ts";
@@ -16,6 +16,7 @@ import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
+import { rsvpEventbrite } from "../rsvp/eventbrite.ts";
 
 const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
@@ -178,6 +179,11 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     };
     // Runs while Claude works, so it doesn't hold up the reply.
     const backgroundCleared = clearBackground(space, profile);
+    // An RSVP takes about a minute in a cloud browser, so it runs after the reply and texts its own result.
+    let rsvp: { url: string; title: string | undefined } | undefined;
+    const startRsvp = (url: string, title: string | undefined) => {
+      rsvp ??= { url, title };
+    };
     try {
       const [taste, saves, history] = await Promise.all([
         listTaste(profile.id),
@@ -185,7 +191,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         getHistory(profile.id),
       ]);
       const generated = await propagateAttributes({ userId: profile.id, sessionId: profile.id }, () =>
-        generateReply({ profile, taste, saves, history, userMessage: text, onWebSearch }),
+        generateReply({ profile, taste, saves, history, userMessage: text, onWebSearch, startRsvp }),
       );
       // Typing must start before the answer lands, or the dots can linger after it.
       await searchingNotice;
@@ -265,8 +271,48 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
     // After the first reply, not before it, so the chat opens with Haps talking.
     await ensureContactCard(space, profile);
+    if (rsvp) void runRsvp(space, profile, rsvp.url, rsvp.title);
   });
   await flushTracing();
+}
+
+// One RSVP per person at a time, so a double "yes" can't register them twice.
+const rsvping = new Set<string>();
+
+/** Runs the RSVP and texts how it went. A confirmed one is saved, so Haps knows they're going. */
+async function runRsvp(space: Space, profile: Profile, url: string, title: string | undefined): Promise<void> {
+  if (rsvping.has(profile.id) || !profile.email || !profile.name) return;
+  rsvping.add(profile.id);
+  const [firstName, ...rest] = profile.name.trim().split(/\s+/);
+  try {
+    // RSVP_DRY_RUN=1 fills the form without registering, for testing on a real event.
+    const submit = process.env.RSVP_DRY_RUN !== "1";
+    const result = await rsvpEventbrite(url, { firstName: firstName!, lastName: rest.join(" "), email: profile.email }, submit);
+    console.log(`[rsvp] sender=${profile.platform_user_id} ${result.status}: ${result.detail} replay=${result.replayUrl}`);
+    const reply =
+      result.status === "confirmed"
+        ? `you're on the list for ${title ?? "it"}, confirmation's in your email`
+        : result.status === "ready"
+          ? `test run: filled the rsvp for ${title ?? "it"} but didn't submit`
+          : result.status === "paid"
+            ? `that one costs money so i didn't buy it, here's the page`
+            : `couldn't rsvp you for ${title ?? "that"}, here's the page so you can do it`;
+    await space.send(reply);
+    if (result.status === "paid" || result.status === "failed" || result.status === "unavailable") {
+      await space.send(richlink(url)).catch(() => space.send(url));
+    }
+    if (result.status === "confirmed") {
+      await saveEvent({ profileId: profile.id, url, title, note: "rsvp confirmed" }).catch((err: unknown) =>
+        console.error(`[rsvp] save failed for sender=${profile.platform_user_id}:`, formatError(err)),
+      );
+    }
+  } catch (err) {
+    console.error(`[rsvp] failed for sender=${profile.platform_user_id}:`, formatError(err));
+    await space.send("couldn't rsvp you for that one, here's the page").catch(() => {});
+    await space.send(url).catch(() => {});
+  } finally {
+    rsvping.delete(profile.id);
+  }
 }
 
 function flyerAttachment(ref: string) {
