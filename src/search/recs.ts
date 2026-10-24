@@ -1,8 +1,11 @@
 import { getRecs, matchRecs, type RecRow } from "../db/recs.ts";
 import { embedQuery } from "./embed.ts";
 
+/** The embedding model needs more memory than the 512 MB worker has, so recs search is off unless RECS_SEARCH=on. */
+export const RECS_SEARCH_ON = process.env.RECS_SEARCH === "on";
+
 /** Metros with an approved recs list. Search there comes from the recs, not the live web. */
-export const RECS_METROS = new Set(["miami", "la"]);
+export const RECS_METROS = new Set(RECS_SEARCH_ON ? ["miami", "la"] : []);
 
 /** Recs that are nights out, for search_events. Everything else is a place for web_search. */
 export const NIGHT_CATEGORIES = ["party", "club", "gay club", "live music", "listening bar", "lounge"];

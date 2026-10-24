@@ -5,6 +5,7 @@ import { terminal } from "spectrum-ts/providers/terminal";
 import { handleMessage } from "./handlers/message.ts";
 import { startTracing } from "./observability.ts";
 import { loadEmbedder } from "./search/embed.ts";
+import { RECS_SEARCH_ON } from "./search/recs.ts";
 import { formatError } from "./utils/text.ts";
 
 const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
@@ -25,7 +26,7 @@ for (const key of [
 startTracing();
 
 // Loaded at boot, not on the first search, so nobody waits for it. A failure only shows up as a failed search later.
-loadEmbedder().catch((err: unknown) => console.error(`[embed] model failed to load: ${formatError(err)}`));
+if (RECS_SEARCH_ON) loadEmbedder().catch((err: unknown) => console.error(`[embed] model failed to load: ${formatError(err)}`));
 
 const app = await Spectrum({
   projectId: process.env.PROJECT_ID!,

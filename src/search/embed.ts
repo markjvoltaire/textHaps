@@ -1,4 +1,4 @@
-import { AutoModel, AutoTokenizer, type PreTrainedModel, type PreTrainedTokenizer } from "@huggingface/transformers";
+import type { PreTrainedModel, PreTrainedTokenizer } from "@huggingface/transformers";
 
 // EmbeddingGemma: multilingual, so a Spanish ask matches English recs. q4 holds at about 400 MB;
 // q8 climbed past 1 GB after a few searches, too much for the 512 MB worker.
@@ -13,14 +13,19 @@ let loaded: Promise<{ tokenizer: PreTrainedTokenizer; model: PreTrainedModel }> 
 
 /** Loads the model once (about 200 MB the first time, then from cache) and keeps it in memory. */
 export function loadEmbedder() {
-  loaded ??= Promise.all([AutoTokenizer.from_pretrained(MODEL), AutoModel.from_pretrained(MODEL, { dtype: DTYPE })]).then(
-    ([tokenizer, model]) => ({ tokenizer, model }),
-    (err: unknown) => {
-      // Not kept, so the next search tries again instead of failing forever.
-      loaded = undefined;
-      throw err;
-    },
-  );
+  // Imported here, not at the top, so the library takes no memory until something embeds.
+  loaded ??= import("@huggingface/transformers")
+    .then(({ AutoModel, AutoTokenizer }) =>
+      Promise.all([AutoTokenizer.from_pretrained(MODEL), AutoModel.from_pretrained(MODEL, { dtype: DTYPE })]),
+    )
+    .then(
+      ([tokenizer, model]) => ({ tokenizer, model }),
+      (err: unknown) => {
+        // Not kept, so the next search tries again instead of failing forever.
+        loaded = undefined;
+        throw err;
+      },
+    );
   return loaded;
 }
 
