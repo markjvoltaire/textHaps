@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "ingest": "tsx src/ingest/run.ts",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "dev:terminal": "SPECTRUM_PROVIDER=terminal node --watch --import tsx src/index.ts",
@@ -12,11 +11,13 @@
     "watch": "tsx src/watch.ts",
     "verify": "tsx src/verify/run.ts",
     "signals": "tsx src/signals/run.ts",
-    "rsvp": "tsx src/rsvp/run.ts"
+    "vectors": "tsx src/search/vectors.ts",
+    "recs": "tsx src/recs/draft.ts",
+    "warm-model": "tsx src/search/warmModel.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
-    "@browserbasehq/stagehand": "4.2.0",
+    "@huggingface/transformers": "^3.7.6",
     "@langfuse/otel": "^6.0.1",
     "@langfuse/tracing": "^6.0.1",
     "@opentelemetry/sdk-trace-node": "^2.10.0",
@@ -24,8 +25,7 @@
     "dotenv": "^17.4.2",
     "ffmpeg-static": "^5.2.0",
     "spectrum-ts": "^12.8.0",
-    "tsx": "^4.23.15",
-    "zod": "4.4.3"
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/node": "^22",

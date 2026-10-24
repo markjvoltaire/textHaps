@@ -2,9 +2,11 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { applyProfileUpdate, updateProfile } from "../db/profiles.ts";
 import { listSaves, saveEvent } from "../db/saves.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
-import type { EventRow, Profile, TasteKind } from "../db/types.ts";
+import type { Profile, TasteKind } from "../db/types.ts";
 import { searchEventPages, searchWeb, type WebResult } from "../search/exa.ts";
 import { searchTikTokVideos } from "../search/monid.ts";
+import { NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
+import { knownMetro, metroFor } from "../utils/metro.ts";
 import { describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
 import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
@@ -89,7 +91,6 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: "object",
       properties: {
-        event_id: { type: "string", description: "Listing id from the events catalog. search_events results have none, so use url for those." },
         url: { type: "string", description: "The event's page url from search_events, or a link the user sent" },
         title: { type: "string" },
         note: { type: "string" },
@@ -114,31 +115,16 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
       type: "object",
       properties: {
         name: { type: "string", description: "Their first name or what they go by" },
-        full_name: { type: "string", description: "Their first and last name, for rsvps" },
+        full_name: { type: "string", description: "Their first and last name" },
         city: { type: "string", description: "City they are in, e.g. NYC" },
         email: { type: "string", description: "Their email, only once they confirmed it" },
       },
       additionalProperties: false,
     },
   },
-  {
-    name: "rsvp_event",
-    description:
-      "RSVP them to a free Eventbrite event with their saved name and email. Only call it after they said yes to rsvping to that specific event in their own message. It runs in the background for about a minute and texts them when it's done.",
-    input_schema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "The event's Eventbrite page url, from search_events, their saves, or a link they sent" },
-        title: { type: "string", description: "The event's name" },
-      },
-      required: ["url"],
-      additionalProperties: false,
-    },
-  },
 ];
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
-const EVENTBRITE_PAGE = /^https:\/\/(www\.)?eventbrite\.[a-z.]+\/e\//i;
 
 type ToolInput = Record<string, unknown>;
 
@@ -193,7 +179,6 @@ function isTasteKind(value: unknown): value is TasteKind {
 
 /** Per-reply state. Each reply gets its own, so one user's search never leaks into another's. */
 export type ToolSession = {
-  searched: EventRow[];
   webSearches: number;
   /** Links web_search returned, the only page links a reply may pass on. */
   webUrls: Set<string>;
@@ -207,8 +192,6 @@ export type ToolSession = {
   userText: string;
   /** The thread before this message. An email must show up here first, so it was repeated back and confirmed. */
   earlierText: string;
-  /** Starts an RSVP in the background; the handler texts the result. Missing where no thread can be texted. */
-  startRsvp?: (url: string, title: string | undefined) => void;
   /** Just the message being answered, the only place read_event_link accepts a link from. */
   userMessage: string;
   /** Event pages read this reply, by normalized url, so the same link is read once and reads stay capped. */
@@ -217,7 +200,7 @@ export type ToolSession = {
   pageText: string;
   /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
   storedText: string;
-  /** Untrusted content (search results, scraped listings) was seen this reply, so links get filtered. Images set it too. */
+  /** Untrusted content (search results, event pages) was seen this reply, so links get filtered. Images set it too. */
   untrusted: boolean;
 };
 
@@ -226,6 +209,15 @@ function isExaPage(url: string): boolean {
     return /(^|\.)exa\.ai$/i.test(new URL(url).hostname);
   } catch {
     return false;
+  }
+}
+
+/** A rec's own site can be sent and becomes the place card, like a web result's. */
+function keepRecLinks(recs: RecResult[], session: ToolSession): void {
+  for (const rec of recs) {
+    if (!rec.url) continue;
+    session.webUrls.add(rec.url);
+    session.webResults.push({ title: rec.name, url: rec.url, published: null, highlights: [] });
   }
 }
 
@@ -248,6 +240,17 @@ export async function runTool(
         return { error: "search_limit", hint: "No more searches this reply. Answer with what you already found." };
       }
       session.webSearches += 1;
+      // A city with a recs list is searched from it. A search naming another city still goes to the web.
+      const metro = knownMetro(query) ?? (profile.city ? metroFor(profile.city) : null);
+      if (metro && RECS_METROS.has(metro)) {
+        const recs = await searchRecs(query, metro);
+        keepRecLinks(recs, session);
+        return {
+          count: recs.length,
+          haps_recs: recs,
+          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If your answer is about one place that has a url, end with that url alone on the last line.",
+        };
+      }
       session.untrusted = true;
       // Exa's own place pages (exa.ai/library/...) are its index, not the venue's site, so they're never sent.
       const results = (await searchWeb(query)).map((result) => (isExaPage(result.url) ? { ...result, url: "" } : result));
@@ -312,8 +315,6 @@ export async function runTool(
       };
     }
     case "search_events": {
-      // Titles and venues are scraped from organizers, so they can carry links too.
-      session.untrusted = true;
       const taste = await listTaste(profile.id);
       if (!taste.some((signal) => signal.kind === "like")) {
         return {
@@ -329,9 +330,22 @@ export async function runTool(
         return { error: "search_limit", hint: "No more searches this reply. Answer with what you already found." };
       }
       session.webSearches += 1;
-      // Live from ticketing sites for now, not the ingested listings table, which went stale.
       const tags = asStringArray(input.tags);
       const vibe = [asString(input.query), ...(tags ?? [])].filter(Boolean).join(" ") || "party";
+      const metro = metroFor(city);
+      if (RECS_METROS.has(metro)) {
+        const recs = await searchRecs(vibe, metro, { categories: NIGHT_CATEGORIES });
+        keepRecLinks(recs, session);
+        session.eventPages.push(...recs.flatMap((rec) => (rec.url ? [{ title: rec.name, url: rec.url }] : [])));
+        return {
+          count: recs.length,
+          haps_recs: recs,
+          hint: "These are recurring nights and venues from Haps's own vetted list, closest match first, not dated listings. Recommend only the ones that fit, and give when as the schedule says it (e.g. saturdays). Never make up a date, a lineup, or say it's on tonight unless the schedule shows that day. If there's no schedule, say it's a spot to check, not that something is on. For one rec that has a url, end with that url alone on the last line.",
+        };
+      }
+      // Titles and venues are scraped from organizers, so they can carry links too.
+      session.untrusted = true;
+      // Live from ticketing sites outside the recs metros.
       // TikTok is extra: if Monid is down or slow, answer from the ticketing pages alone.
       const [pages, videos] = await Promise.all([
         searchEventPages(`${vibe} events in ${city} ${windowWords(asString(input.from), asString(input.to))}`),
@@ -394,7 +408,6 @@ export async function runTool(
       }
       const saved = await saveEvent({
         profileId: profile.id,
-        listingId: asString(input.event_id),
         url: asString(input.url),
         title: asString(input.title),
         note: asString(input.note),
@@ -403,9 +416,9 @@ export async function runTool(
     }
     case "list_saves": {
       const saves = await listSaves(profile.id);
-      // Saved listings are scraped, but a user asking for their saved link should get it.
+      // Saved links can come from scraped pages, but a user asking for their saved link should get it.
       session.untrusted = true;
-      for (const save of saves) for (const url of [save.url, save.listing?.url]) if (url) session.savedUrls.add(url);
+      for (const save of saves) if (save.url) session.savedUrls.add(save.url);
       return { count: saves.length, saves };
     }
     case "update_profile": {
@@ -437,24 +450,6 @@ export async function runTool(
       });
       applyProfileUpdate(profile, updated);
       return { name: updated.name, full_name: updated.full_name, city: updated.city, email: updated.email };
-    }
-    case "rsvp_event": {
-      const url = asString(input.url);
-      if (!url || !EVENTBRITE_PAGE.test(url)) {
-        return { error: "not_eventbrite", hint: "Only free Eventbrite events for now. Send them the event's link so they can rsvp there." };
-      }
-      if (!isExactLink(url, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
-        return { error: "url_not_from_user_or_search", hint: "Only rsvp to a link the user sent, saved, or a search returned." };
-      }
-      if (!profile.email) {
-        return { error: "email_required", hint: "Ask for their email, repeat it back to confirm, save it with update_profile, then rsvp." };
-      }
-      if (!profile.full_name) {
-        return { error: "full_name_required", hint: "Eventbrite needs a first and last name. Ask for their full name and save it with update_profile as full_name." };
-      }
-      if (!session.startRsvp) return { error: "rsvp_unavailable", hint: "Send them the event's link so they can rsvp there." };
-      session.startRsvp(url, asString(input.title));
-      return { started: true, hint: "Tell them you're on it and you'll text when it's done. Don't say they're in yet." };
     }
     default:
       return { error: `unknown tool ${name}` };

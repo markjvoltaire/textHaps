@@ -30,6 +30,31 @@ export async function searchEventPages(query: string, since?: Date): Promise<Web
   });
 }
 
+/** Ranked pages with their text, for reading editorial lists ("best bars in Miami") in full. */
+export async function searchPagesWithText(query: string, numResults = 10, maxCharacters = 6000): Promise<PageContent[]> {
+  const token = process.env.EXA_API_KEY;
+  if (!token) throw new Error("EXA_API_KEY missing");
+
+  const response = await fetch(EXA_URL, {
+    method: "POST",
+    headers: {
+      "x-api-key": token,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, numResults, userLocation: "US", contents: { text: { maxCharacters } } }),
+    // Offline drafting, not a waiting user, so full text is worth the wait.
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!response.ok) {
+    throw new Error(`exa ${response.status}: ${await response.text()}`);
+  }
+
+  const payload = (await response.json()) as ExaContentsResponse;
+  return (payload.results ?? [])
+    .filter((result) => typeof result.url === "string" && typeof result.text === "string" && result.text.trim())
+    .map((result) => ({ url: result.url!, title: result.title ?? "", text: result.text!.trim() }));
+}
+
 async function exaSearch(options: {
   query: string;
   numResults: number;
