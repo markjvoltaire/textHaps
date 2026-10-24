@@ -2,7 +2,7 @@ services:
   - type: worker
     name: texthaps-agent
     runtime: node
-    plan: starter
+    plan: standard
     # The embedding model is downloaded at build time, so it ships with the deploy.
     buildCommand: npm ci && npm run warm-model
     startCommand: npm run start

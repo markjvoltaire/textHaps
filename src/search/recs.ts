@@ -1,8 +1,8 @@
 import { getRecs, matchRecs, type RecRow } from "../db/recs.ts";
 import { embedQuery } from "./embed.ts";
 
-/** The embedding model needs more memory than the 512 MB worker has, so recs search is off unless RECS_SEARCH=on. */
-export const RECS_SEARCH_ON = process.env.RECS_SEARCH === "on";
+/** The embedding model takes ~400 MB, more than a 512 MB worker has room for. RECS_SEARCH=off turns it and recs search off. */
+export const RECS_SEARCH_ON = process.env.RECS_SEARCH !== "off";
 
 /** Metros with an approved recs list. Search there comes from the recs, not the live web. */
 export const RECS_METROS = new Set(RECS_SEARCH_ON ? ["miami", "la"] : []);
