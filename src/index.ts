@@ -36,6 +36,11 @@ const queues = new Map<string, Promise<void>>();
 
 for await (const [space, message] of app.messages) {
   const key = message.sender?.id ?? space.id;
+  // "Read" goes out the moment the message lands, not after the database claim or an earlier
+  // reply still in this sender's queue. Both workers may mark it during a deploy; that's harmless.
+  if (message.direction !== "outbound" && message.content.type !== "read") {
+    void message.read().catch((err: unknown) => console.warn(`[read] failed space=${space.id}:`, formatError(err)));
+  }
   const next = (queues.get(key) ?? Promise.resolve())
     .then(() => space.responding(() => handleMessage(space, message)))
     .catch((err: unknown) => {

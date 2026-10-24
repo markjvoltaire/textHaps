@@ -22,6 +22,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 const MAX_TOOL_ROUNDS = 4;
+// Short chat replies don't need deep thinking, and lower effort answers faster.
+const EFFORT = (process.env.ANTHROPIC_EFFORT ?? "low") as "low" | "medium" | "high";
 
 function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[]): string {
   const tasteLines =
@@ -149,6 +151,10 @@ export async function generateReply(input: {
       const stream = anthropic.messages.stream({
         model: MODEL,
         max_tokens: 1024,
+        // Caches the prompt up to the newest message, so the next round and the next reply
+        // read the tools, system prompt, and history from cache instead of reprocessing them.
+        cache_control: { type: "ephemeral" },
+        output_config: { effort: EFFORT },
         system,
         tools: HAPS_TOOLS,
         ...(lastRound && { tool_choice: { type: "none" as const } }),
@@ -171,7 +177,12 @@ export async function generateReply(input: {
     generation
       .update({
         output: response.content,
-        usageDetails: { input: response.usage.input_tokens, output: response.usage.output_tokens },
+        usageDetails: {
+          input: response.usage.input_tokens,
+          output: response.usage.output_tokens,
+          cache_read_input_tokens: response.usage.cache_read_input_tokens ?? 0,
+          cache_creation_input_tokens: response.usage.cache_creation_input_tokens ?? 0,
+        },
         metadata: { stop_reason: response.stop_reason },
       })
       .end();

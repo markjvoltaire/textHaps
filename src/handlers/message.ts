@@ -35,6 +35,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** One Langfuse span per Photon send, so a trace shows which send was slow. */
+function traced<T>(what: string, send: () => Promise<T>): Promise<T> {
+  return startActiveObservation(`send ${what}`, () => send());
+}
+
 type Audio = { mimeType: string; read: () => Promise<Buffer> };
 
 /** A voice note, or an audio file sent as an attachment. */
@@ -51,7 +56,7 @@ const ICON_PATH = join(ASSETS_DIR, "haps-icon.jpg");
 async function ensureBackground(space: Space, profile: Profile): Promise<void> {
   if (profile.platform !== "imessage" || profile.background_set_at) return;
   try {
-    await space.send(background(BACKGROUND_PATH));
+    await traced("background", () => space.send(background(BACKGROUND_PATH)));
     await markBackgroundSet(profile.id);
     console.log(`[background] set for sender=${profile.platform_user_id}`);
   } catch (err) {
@@ -67,17 +72,19 @@ async function ensureBackground(space: Space, profile: Profile): Promise<void> {
 async function ensureContactCard(space: Space, profile: Profile): Promise<void> {
   if (profile.platform !== "imessage" || profile.contact_card_sent_at) return;
   try {
-    await space.send(nativeContactCard());
+    await traced("native contact card", () => space.send(nativeContactCard()));
     // Marked now so a failing card send below can't re-send the native card on every reply.
     await markContactCardSent(profile.id);
     const phone = process.env.HAPS_PHONE_NUMBER;
     if (phone) {
-      await space.send(
-        contact({
-          name: { first: "Haps" },
-          phones: [{ value: phone, type: "mobile" }],
-          photo: { mimeType: "image/jpeg", read: () => readFile(ICON_PATH) },
-        }),
+      await traced("contact card", () =>
+        space.send(
+          contact({
+            name: { first: "Haps" },
+            phones: [{ value: phone, type: "mobile" }],
+            photo: { mimeType: "image/jpeg", read: () => readFile(ICON_PATH) },
+          }),
+        ),
       );
     }
     console.log(`[contact] shared with sender=${profile.platform_user_id} card=${Boolean(phone)}`);
@@ -87,6 +94,7 @@ async function ensureContactCard(space: Space, profile: Profile): Promise<void> 
 }
 
 export async function handleMessage(space: Space, message: Message): Promise<void> {
+  const receivedAt = Date.now();
   if (message.direction === "outbound") return;
   if (message.content.type === "read") return;
   const audio = audioOf(message.content);
@@ -107,12 +115,6 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       return;
     }
   }
-
-  // Mark the chat read before Claude work so the sender sees "Read" quickly.
-  await message.read().catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[read] failed space=${space.id}: ${msg}`);
-  });
 
   const senderId = message.sender?.id ?? space.id;
   const platform = message.platform || "imessage";
@@ -174,8 +176,9 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         .startTyping()
         .catch((err: unknown) => console.warn(`[searching] typing failed for sender=${senderId}:`, formatError(err)));
     };
+    // Sent while Claude works rather than before it; it still lands before the first bubble.
+    const backgroundSet = ensureBackground(space, profile);
     try {
-      await ensureBackground(space, profile);
       const [taste, saves, history] = await Promise.all([
         listTaste(profile.id),
         listSaves(profile.id),
@@ -196,11 +199,12 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
       span.update({ level: "ERROR", statusMessage: formatError(err) });
       // Let typing start first so the dots don't linger after the glitch message.
-      await searchingNotice;
+      await Promise.all([backgroundSet, searchingNotice]);
       await space.send(FALLBACK_REPLY);
       return;
     }
 
+    await backgroundSet;
     if (!reply) {
       console.warn(`[claude] empty reply for sender=${senderId}`);
       // They watched the typing dots through a search, so don't leave them hanging.
@@ -210,7 +214,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
     // Only commit the exchange once the model actually produced something.
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
-    // only a link goes out as one rich link card before them, so it doesn't take a text slot.
+    // only a link goes out as one rich link card after them, so it doesn't take a text slot.
     const lines = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean);
     // Haps's own link line wins; otherwise the one place's site picked from the search results.
     const link = lines.find((line) => BARE_URL.test(line)) ?? placeLink ?? undefined;
@@ -228,26 +232,26 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const first = flyers[0];
     const second = flyers[1];
     const photos = first && second ? group(first, second, ...flyers.slice(2)) : first;
-    // The place's card leads, so the answer reads as notes on the place it shows.
-    // Photon builds the preview before confirming, which once took 30s and then failed. The card
-    // is extra, so a slow or failed one never holds up or drops the answer; it's not retried,
+    // No pauses between bubbles: each send already takes a couple of seconds to confirm.
+    if (photos && lead) {
+      await traced("lead with flyers", () => space.send(photos, lead));
+    } else if (photos) {
+      await traced("flyers", () => space.send(photos));
+    } else if (lead) {
+      await traced("lead", () => space.send(lead));
+    }
+    // What the user actually waited for, from the message arriving to the first thing they see.
+    span.update({ metadata: { firstBubbleMs: Date.now() - receivedAt } });
+    for (const bubble of rest.slice(0, 2)) {
+      await traced("bubble", () => space.send(bubble));
+    }
+    // The place's card goes last so it never holds up the answer. Photon builds the preview
+    // before confirming, which once took 30s and then failed, so it's capped; it's not retried,
     // since it may still land.
     if (link) {
-      await withTimeout(space.send(richlink(link)), RICHLINK_TIMEOUT_MS, "rich link").catch((err: unknown) =>
-        console.warn(`[richlink] send failed for sender=${senderId}, sending the text anyway:`, formatError(err)),
+      await withTimeout(traced("rich link", () => space.send(richlink(link))), RICHLINK_TIMEOUT_MS, "rich link").catch(
+        (err: unknown) => console.warn(`[richlink] send failed for sender=${senderId}:`, formatError(err)),
       );
-      if (lead || photos) await new Promise((resolve) => setTimeout(resolve, 900));
-    }
-    if (photos && lead) {
-      await space.send(photos, lead);
-    } else if (photos) {
-      await space.send(photos);
-    } else if (lead) {
-      await space.send(lead);
-    }
-    for (const bubble of rest.slice(0, 2)) {
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      await space.send(bubble);
     }
     // After the first reply, not before it, so the chat opens with Haps talking.
     await ensureContactCard(space, profile);
