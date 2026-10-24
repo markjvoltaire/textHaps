@@ -281,9 +281,9 @@ const rsvping = new Set<string>();
 
 /** Runs the RSVP and texts how it went. A confirmed one is saved, so Haps knows they're going. */
 async function runRsvp(space: Space, profile: Profile, url: string, title: string | undefined): Promise<void> {
-  if (rsvping.has(profile.id) || !profile.email || !profile.name) return;
+  if (rsvping.has(profile.id) || !profile.email || !profile.full_name) return;
   rsvping.add(profile.id);
-  const [firstName, ...rest] = profile.name.trim().split(/\s+/);
+  const [firstName, ...rest] = profile.full_name.trim().split(/\s+/);
   try {
     // RSVP_DRY_RUN=1 fills the form without registering, for testing on a real event.
     const submit = process.env.RSVP_DRY_RUN !== "1";

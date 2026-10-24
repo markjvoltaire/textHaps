@@ -5,6 +5,7 @@ export type ProfilePatch = {
   name?: string;
   city?: string;
   email?: string;
+  full_name?: string;
 };
 
 export async function upsertProfile(platform: string, platformUserId: string): Promise<Profile> {
@@ -71,6 +72,8 @@ export function isOnboarded(profile: Profile, taste: TasteSignal[]): boolean {
 export function applyProfileUpdate(profile: Profile, updated: Profile): void {
   profile.name = updated.name;
   profile.city = updated.city;
+  profile.email = updated.email;
+  profile.full_name = updated.full_name;
 }
 
 export async function markBackgroundCleared(profileId: string): Promise<void> {

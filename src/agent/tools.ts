@@ -109,11 +109,12 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "update_profile",
     description:
-      "Save their city, name, or email. Call it for city or name whenever they mention them. Only save an email after you repeated it back and they said it's right.",
+      "Save their city, name, full name, or email. Call it for city or name whenever they mention them. Only save an email after you repeated it back and they said it's right.",
     input_schema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "Their first name or what they go by, or their full name if they gave it for an rsvp" },
+        name: { type: "string", description: "Their first name or what they go by" },
+        full_name: { type: "string", description: "Their first and last name, for rsvps" },
         city: { type: "string", description: "City they are in, e.g. NYC" },
         email: { type: "string", description: "Their email, only once they confirmed it" },
       },
@@ -411,10 +412,14 @@ export async function runTool(
       const name = asString(input.name);
       const city = asString(input.city);
       const email = asString(input.email)?.trim().toLowerCase();
-      if (!name && !city && !email) {
+      const fullName = asString(input.full_name)?.trim().replace(/\s+/g, " ");
+      if (!name && !city && !email && !fullName) {
         return { error: "nothing_to_update" };
       }
-      if ([name, city, email].some((value) => value && plantedByPage(value, session))) {
+      if (fullName && fullName.split(" ").length < 2) {
+        return { error: "need_last_name", hint: "That's one name. Ask for their first and last name." };
+      }
+      if ([name, city, email, fullName].some((value) => value && plantedByPage(value, session))) {
         return { error: "not_from_user", hint: "That came from the event page. Only use what the user said themselves." };
       }
       if (email) {
@@ -428,9 +433,10 @@ export async function runTool(
         ...(name ? { name } : {}),
         ...(city ? { city } : {}),
         ...(email ? { email } : {}),
+        ...(fullName ? { full_name: fullName } : {}),
       });
       applyProfileUpdate(profile, updated);
-      return { name: updated.name, city: updated.city, email: updated.email };
+      return { name: updated.name, full_name: updated.full_name, city: updated.city, email: updated.email };
     }
     case "rsvp_event": {
       const url = asString(input.url);
@@ -443,8 +449,8 @@ export async function runTool(
       if (!profile.email) {
         return { error: "email_required", hint: "Ask for their email, repeat it back to confirm, save it with update_profile, then rsvp." };
       }
-      if ((profile.name ?? "").trim().split(/\s+/).length < 2) {
-        return { error: "full_name_required", hint: "Eventbrite needs a first and last name. Ask for their full name and save it with update_profile." };
+      if (!profile.full_name) {
+        return { error: "full_name_required", hint: "Eventbrite needs a first and last name. Ask for their full name and save it with update_profile as full_name." };
       }
       if (!session.startRsvp) return { error: "rsvp_unavailable", hint: "Send them the event's link so they can rsvp there." };
       session.startRsvp(url, asString(input.title));

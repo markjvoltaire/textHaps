@@ -13,6 +13,8 @@ export type Profile = {
   date_of_birth: string | null;
   city: string | null;
   email: string | null;
+  /** First and last name for RSVPs; name stays what they go by. */
+  full_name: string | null;
   background_set_at: string | null;
   contact_card_sent_at: string | null;
   created_at: string;
