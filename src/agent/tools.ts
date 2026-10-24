@@ -180,6 +180,8 @@ export type ToolSession = {
   webUrls: Set<string>;
   /** web_search results this reply, so the handler can attach the one place's own site as a card. */
   webResults: WebResult[];
+  /** Event pages search_events found this reply, so the ones the reply names keep their links for follow-ups. */
+  eventPages: { title: string; url: string }[];
   /** Urls from the user's saves: exact matches only, not whole hosts. */
   savedUrls: Set<string>;
   /** The user's own text this reply (chat plus current message), the only other source of links. */
@@ -318,6 +320,7 @@ export async function runTool(
       // Event pages and videos can be sent as links or saved, so they count as found by a search.
       for (const page of pages) session.webUrls.add(page.url);
       for (const video of videos) session.webUrls.add(video.url);
+      session.eventPages.push(...pages.map((page) => ({ title: page.title, url: page.url })));
       return {
         count: pages.length + videos.length,
         untrusted_event_pages: pages,

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
 import { attachment, contact, group, richlink, type Message, type Space } from "spectrum-ts";
 import { background, nativeContactCard } from "spectrum-ts/providers/imessage";
-import { generateReply } from "../agent/claude.ts";
+import { generateReply, LINKS_NOTE } from "../agent/claude.ts";
 import { formatCatalogOverview } from "../db/events.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
@@ -167,6 +167,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     let reply: string;
     let imagePaths: string[] = [];
     let placeLink: string | null = null;
+    let eventLinks: { title: string; url: string }[] = [];
     // Web searches take a few seconds, so keep the typing dots going instead of texting a heads-up.
     let searchingNotice: Promise<void> | undefined;
     const onWebSearch = () => {
@@ -190,6 +191,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       await searchingNotice;
       imagePaths = generated.imagePaths;
       placeLink = generated.placeLink;
+      eventLinks = generated.eventLinks;
       reply = sanitizeOutgoingText(generated.text);
       if (!reply && imagePaths.length > 0) {
         reply = sanitizeOutgoingText(formatCatalogOverview(generated.events));
@@ -214,13 +216,22 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // Only commit the exchange once the model actually produced something.
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
     // only a link goes out as one rich link card after them, so it doesn't take a text slot.
-    const lines = reply.split(/\n+/).map((part) => part.trim()).filter(Boolean);
+    // The links note is only for history; if Claude copies one into a reply, it never goes out.
+    const lines = reply
+      .split(/\n+/)
+      .map((part) => part.trim())
+      .filter((part) => part && !part.toLowerCase().startsWith(LINKS_NOTE));
     // Haps's own link line wins; otherwise the one place's site picked from the search results.
     const link = lines.find((line) => BARE_URL.test(line)) ?? placeLink ?? undefined;
     const bubbles = lines.filter((line) => !BARE_URL.test(line)).slice(0, 3);
     const sent = [...bubbles, ...(link ? [link] : [])].join("\n");
     span.update({ output: sent, metadata: { platform, flyers: imagePaths.length, richlink: Boolean(link) } });
-    await appendExchange(profile.id, senderId, text, sent).catch((err: unknown) => {
+    // Event pages the reply named but didn't send, so a follow-up ("can you rsvp") can still send the link.
+    const unsent = eventLinks.filter((item) => item.url !== link);
+    const remembered = unsent.length
+      ? `${sent}\n${LINKS_NOTE} ${unsent.map((item) => `${item.title} ${item.url}`).join(" · ")})`
+      : sent;
+    await appendExchange(profile.id, senderId, text, remembered).catch((err: unknown) => {
       console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
     });
 
