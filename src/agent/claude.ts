@@ -51,6 +51,9 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 const MAX_TOOL_ROUNDS = 4;
 /** Tools that only record what they said. Their results never change the reply. */
 const SAVE_TOOLS = new Set(["remember_taste", "forget_taste", "update_profile", "record_pick"]);
+/** Claude writing about its own tool calls or redoing its reply, which must never be texted. */
+const PLANNING =
+  /\b(remember_taste|forget_taste|update_profile|record_pick|search_events|web_search|read_event_link|save_event|tool calls?|calls below|reply first|then reply|updating now|let me)\b|\bsav(e|ed|es|ing)\b|\b(writing|rewrite|redo)\w* (the|my) reply\b/i;
 // Short chat replies don't need deep thinking, and lower effort answers faster.
 const EFFORT = (process.env.ANTHROPIC_EFFORT ?? "low") as "low" | "medium" | "high";
 
@@ -160,7 +163,7 @@ Other tools:
 - When they say they're over something, not into it anymore, or their taste changed, call forget_taste for the old one, and remember_taste for the new one if they named it.
 - When they mention their city or name, call update_profile.
 - When they want to keep an event or send a link, call save_event.
-- Saving never changes what you say back. So when the only tools you need are remember_taste, forget_taste, update_profile, or record_pick, write your whole reply text first, then make those calls after it in the same response. That text is sent the moment they save, and you won't get another turn. Never call a save tool with no reply text before it.
+- Saving never changes what you say back. So when the only tools you need are remember_taste, forget_taste, update_profile, or record_pick, write your whole reply first, then make those calls after it in the same response. You won't get another turn, so never make those calls without the reply before them. That reply is texted to them word for word: only what you'd say to them, never a word about saving, tools, or your plan ("save these", "save that, then", "calls below").
 - If you already wrote your answer next to a tool call, don't repeat it after.
 - Don't say you're searching, and never narrate your thinking or what you're checking ("budget is missing, so i'll ask", "saving that"). Every word you write gets texted to them. Just answer.
 - Answer their latest message. Earlier turns are only context: once something is done or dropped, don't bring it back, follow up on it, or correct what you said about it unless they ask. That includes any earlier promise to rsvp, buy, remind, or text them later. You can't do those, so let it go quietly.
@@ -367,6 +370,17 @@ export async function generateReply(input: {
     // add ~2.5s for nothing. Most onboarding turns are exactly this. If any save fails (say an
     // email that wasn't confirmed), fall through so Claude can see the error and answer it.
     const saveOnly = toolNames.length > 0 && toolNames.every((name) => SAVE_TOOLS.has(name));
+    // Text that talks about the saves ("save these as tastes", "update_profile area...") is Claude
+    // planning, not the reply. It's dropped, and the next call writes the reply instead. This
+    // errs toward dropping: a real reply that says "saved" just costs the second call.
+    if (saveOnly && PLANNING.test(text)) {
+      const saved = await Promise.all(
+        response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === "tool_use").map(runBlock),
+      );
+      messages.push({ role: "assistant", content: response.content.filter((block) => block.type !== "text") });
+      messages.push({ role: "user", content: saved });
+      continue;
+    }
     if (saveOnly && text) {
       const saved = await Promise.all(
         response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === "tool_use").map(runBlock),
