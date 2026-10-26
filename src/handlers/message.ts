@@ -23,6 +23,8 @@ const AUDIO_READ_TIMEOUT_MS = 10_000;
 // A reply line that is nothing but a link, sent as a rich link card.
 const BARE_URL = /^https?:\/\/\S+$/i;
 const RICHLINK_TIMEOUT_MS = 6_000;
+/** How long the texts wait on a rec's site lookup (Exa + Jev, ~1s, usually started during the reply). A late one just goes out without a card. */
+const REC_SITE_WAIT_MS = 2_500;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -190,6 +192,16 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const texts = lines.filter((line) => !BARE_URL.test(line));
     const closing = texts.length > 3 && texts.at(-1)!.endsWith("?") ? [texts.at(-1)!] : [];
     const bubbles = [...texts.slice(0, 3), ...closing];
+    // Recs the reply names that have no site saved: finish looking them up (Exa, checked by Jev),
+    // so they get a card too. Found sites are saved to the recs table for next time.
+    const missingSites = recsNamedIn(bubbles.join("\n"), recsOffered).filter((rec) => !rec.url && rec.site);
+    if (missingSites.length) {
+      await withTimeout(
+        Promise.all(missingSites.map(async (rec) => void (rec.url = await rec.site!()))),
+        REC_SITE_WAIT_MS,
+        "rec sites",
+      ).catch((err: unknown) => console.warn(`[reclink] gave up waiting for sender=${senderId}:`, formatError(err)));
+    }
     // What goes out, in order. One place: its card first. Several recs: each rec's card right
     // before the text about it, so every pick that has a page gets one.
     const plan: { card?: string; text?: string }[] = [];

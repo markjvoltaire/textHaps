@@ -13,8 +13,8 @@ export const NIGHT_CATEGORIES = ["party", "club", "gay club", "live music", "lis
 
 export type RecResult = Pick<
   RecRow,
-  "id" | "name" | "category" | "neighborhood" | "address" | "url" | "why" | "best_for" | "vibe" | "music" | "crowd" | "price" | "schedule"
->;
+  "id" | "metro" | "name" | "category" | "neighborhood" | "address" | "url" | "why" | "best_for" | "vibe" | "music" | "crowd" | "price" | "schedule"
+> & { url_checked_at: string | null };
 
 /** The approved recs closest in meaning to the ask, nearest first, nudged toward their taste when there is one. */
 export async function searchRecs(
@@ -27,7 +27,7 @@ export async function searchRecs(
   return matches.flatMap((match) => {
     const row = rows.get(match.id);
     if (!row) return [];
-    const { id, name, category, neighborhood, address, url, why, best_for, vibe, music, crowd, price, schedule } = row;
-    return [{ id, name, category, neighborhood, address, url, why, best_for, vibe, music, crowd, price, schedule }];
+    const { id, metro, name, category, neighborhood, address, url, url_checked_at, why, best_for, vibe, music, crowd, price, schedule } = row;
+    return [{ id, metro, name, category, neighborhood, address, url, url_checked_at, why, best_for, vibe, music, crowd, price, schedule }];
   });
 }

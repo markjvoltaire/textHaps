@@ -21,7 +21,7 @@ export type RecDraft = {
   status?: RecStatus;
 };
 
-export type RecRow = RecDraft & { id: string; key: string; status: RecStatus; created_at: string };
+export type RecRow = RecDraft & { id: string; key: string; status: RecStatus; created_at: string; url_checked_at: string | null };
 
 export type RecMatch = {
   id: string;
@@ -89,7 +89,7 @@ export async function getRecs(ids: string[]): Promise<RecRow[]> {
   if (ids.length === 0) return [];
   const { data, error } = await getSupabase()
     .from("recs")
-    .select("id, key, metro, name, category, neighborhood, address, url, why, best_for, vibe, music, crowd, price, schedule, vouched_by, sources, status, created_at")
+    .select("id, key, metro, name, category, neighborhood, address, url, url_checked_at, why, best_for, vibe, music, crowd, price, schedule, vouched_by, sources, status, created_at")
     .in("id", ids);
   if (error) throw error;
   return (data ?? []) as RecRow[];

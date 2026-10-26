@@ -5,6 +5,7 @@ import { listSaves, saveEvent } from "../db/saves.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
 import { TASTE_CATEGORIES, type Profile, type TasteCategory, type TasteKind, type TasteSource } from "../db/types.ts";
 import { searchEventPages, searchWeb, type WebResult } from "../search/exa.ts";
+import { ensureRecSite } from "../recs/link.ts";
 import { searchTikTokVideos } from "../search/monid.ts";
 import { NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
 import { refreshTasteEmbedding, tasteVector } from "../search/taste.ts";
@@ -313,14 +314,26 @@ function isExaPage(url: string): boolean {
   }
 }
 
-/** What Claude sees of the recs: everything but the id. */
-function forClaude(recs: RecResult[]): Omit<RecResult, "id">[] {
-  return recs.map(({ id: _id, ...rec }) => rec);
+/** What Claude sees of the recs: everything but the id and bookkeeping. */
+function forClaude(recs: RecResult[]): Omit<RecResult, "id" | "metro" | "url_checked_at">[] {
+  return recs.map(({ id: _id, metro: _metro, url_checked_at: _checked, ...rec }) => rec);
 }
+
+/**
+ * Recs without a site that get looked up as soon as a search returns them, nearest first. The
+ * lookup (~1s) runs while Claude writes the reply, so the card is usually ready by send time.
+ * Ones further down are only looked up if the reply names them.
+ */
+const PREFETCH_SITES = 4;
 
 /** A rec's own site can be sent and becomes the place card, like a web result's. */
 function keepRecLinks(recs: RecResult[], session: ToolSession): void {
-  for (const rec of recs) session.recsOffered.set(rec.id, { id: rec.id, name: rec.name, url: rec.url });
+  recs.forEach((rec, i) => {
+    let lookup: Promise<string | null> | undefined;
+    const site = () => (lookup ??= ensureRecSite(rec));
+    session.recsOffered.set(rec.id, { id: rec.id, name: rec.name, url: rec.url, site });
+    if (!rec.url && i < PREFETCH_SITES) void site();
+  });
   for (const rec of recs) {
     if (!rec.url) continue;
     session.webUrls.add(rec.url);

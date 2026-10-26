@@ -23,5 +23,8 @@ services:
         sync: false
       - key: EXA_API_KEY
         sync: false
+      # Jev checks a rec's Exa result is its own site before it's sent as a card.
+      - key: JEV_API_KEY
+        sync: false
       - key: MONID_API_KEY
         sync: false

@@ -1,7 +1,13 @@
 import { getSupabase } from "./client.ts";
 import { recKey } from "./recs.ts";
 
-export type ShownRec = { id: string; name: string; url: string | null };
+export type ShownRec = {
+  id: string;
+  name: string;
+  url: string | null;
+  /** Looks up and saves the rec's own site when it has none. Started early, so it's usually done by send time. */
+  site?: () => Promise<string | null>;
+};
 export type PickOutcome = "picked" | "passed";
 
 /** The searched recs a reply actually sent, by name ("stamped" counts for "Stamped: AYA x Friends"). */

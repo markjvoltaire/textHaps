@@ -25,6 +25,12 @@ function hostOf(url: string): string | undefined {
   }
 }
 
+/** The host of a url that could be a place's own site, or undefined for review, map, social, and ticket sites. */
+export function officialHost(url: string): string | undefined {
+  const host = hostOf(url);
+  return host && !NOT_OFFICIAL.test(host) ? host : undefined;
+}
+
 /** Ways a reply might name the place behind this result: its domain, the domain minus city words, and its title. */
 function namesFor(result: WebResult, host: string): string[] {
   const core = host.split(".")[0] ?? "";
