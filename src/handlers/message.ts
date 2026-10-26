@@ -2,6 +2,7 @@ import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
 import { attachment, richlink, type Message, type Space } from "spectrum-ts";
 import { background } from "spectrum-ts/providers/imessage";
 import { generateReply, LINKS_NOTE } from "../agent/claude.ts";
+import { recordShown, recsNamedIn, type ShownRec } from "../db/picks.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
 import { markBackgroundCleared, upsertProfile } from "../db/profiles.ts";
@@ -132,6 +133,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     let reply: string;
     let placeLink: string | null = null;
     let eventLinks: { title: string; url: string }[] = [];
+    let recsOffered: ShownRec[] = [];
     // Web searches take a few seconds, so keep the typing dots going instead of texting a heads-up.
     let searchingNotice: Promise<void> | undefined;
     const onWebSearch = () => {
@@ -155,6 +157,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       await searchingNotice;
       placeLink = generated.placeLink;
       eventLinks = generated.eventLinks;
+      recsOffered = generated.recsOffered;
       reply = sanitizeOutgoingText(generated.text);
     } catch (err) {
       console.error(`[handler] failed for sender=${senderId}:`, formatError(err));
@@ -174,7 +177,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
 
     // Only commit the exchange once the model actually produced something.
-    // Keep only what the user actually sees: the lead plus up to 2 more bubbles. A line that is
+    // Keep only what the user actually sees: the lead plus up to 2 more bubbles, and a closing
+    // question (which rec they're going with) after them. A line that is
     // only a link goes out as one rich link card before them, so it doesn't take a text slot.
     // The links note is only for history; if Claude copies one into a reply, it never goes out.
     const lines = reply
@@ -183,7 +187,9 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       .filter((part) => part && !part.toLowerCase().startsWith(LINKS_NOTE));
     // Haps's own link line wins; otherwise the one place's site picked from the search results.
     const link = lines.find((line) => BARE_URL.test(line)) ?? placeLink ?? undefined;
-    const bubbles = lines.filter((line) => !BARE_URL.test(line)).slice(0, 3);
+    const texts = lines.filter((line) => !BARE_URL.test(line));
+    const closing = texts.length > 3 && texts.at(-1)!.endsWith("?") ? [texts.at(-1)!] : [];
+    const bubbles = [...texts.slice(0, 3), ...closing];
     const sent = [...(link ? [link] : []), ...bubbles].join("\n");
     span.update({ output: sent, metadata: { platform, richlink: Boolean(link) } });
     // Event pages the reply named but didn't send, so a follow-up ("can you rsvp") can still send the link.
@@ -191,6 +197,10 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const remembered = unsent.length
       ? `${sent}\n${LINKS_NOTE} ${unsent.map((item) => `${item.title} ${item.url}`).join(" · ")})`
       : sent;
+    // Only what went out counts as shown, so a rec cut by the bubble limit isn't logged.
+    recordShown(profile.id, recsNamedIn(sent, recsOffered)).catch((err: unknown) =>
+      console.error(`[picks] logging shown recs failed for sender=${senderId}:`, formatError(err)),
+    );
     await appendExchange(profile.id, senderId, text, remembered).catch((err: unknown) => {
       console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
     });
@@ -212,7 +222,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
     // What the user actually waited for, from the message arriving to the first text they see.
     span.update({ metadata: { firstBubbleMs: Date.now() - receivedAt } });
-    for (const bubble of rest.slice(0, 2)) {
+    for (const bubble of rest) {
       await traced("bubble", () => space.send(bubble));
     }
   });

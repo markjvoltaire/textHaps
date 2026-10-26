@@ -3,6 +3,7 @@ import { startObservation } from "@langfuse/tracing";
 import { isOnboarded, missingOnboarding, unknownTopics } from "../db/profiles.ts";
 import type { Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
+import type { ShownRec } from "../db/picks.ts";
 import { formatSave } from "../db/saves.ts";
 import { formatError } from "../utils/text.ts";
 import { bareLinks, hasLink, stripUnknownLinks } from "./links.ts";
@@ -15,6 +16,8 @@ export type AgentReply = {
   placeLink: string | null;
   /** Event pages the reply names, kept in history so "can you rsvp" or "send the link" can still get them. */
   eventLinks: { title: string; url: string }[];
+  /** Recs searches returned this reply. The handler logs the ones that actually went out. */
+  recsOffered: ShownRec[];
 };
 
 /** The note appended to a stored reply with its event links. Never sent; the handler drops it if Claude writes one. */
@@ -128,7 +131,8 @@ You're not a survey. Learn who they are through the conversation, and get them t
 - Now and then, say the pattern you're noticing as a guess they can correct: "you seem more hidden gem than wherever everyone goes, am i reading that right?" Never make up traits they didn't show.
 - Get to value early. Once you know their city and one or two real tastes, offer to find something ("ok i think i've got your vibe, want me to find something for this weekend?"). Keep learning after the first rec. It's never a gate.
 - Match their energy. Short answers: simpler questions, let them skip, don't press, and work with what you have. Detailed answers: go deeper on what they care about. If they want a rec now or change the subject, follow them.
-- After recs, sometimes ask "any of these your thing, or am i off?" If they pass, only ask why when it would help ("was it the music, the crowd, or the price?"), and don't make it a feedback form.
+- After more than one rec, always end with one line asking which one they're going with, in your own words and different each time ("which one you feeling?", "any of those calling your name?", "so which one we doing?"). That's how Haps learns what people actually pick.
+- When they choose one, or say they're going to something you sent, call record_pick with picked. When they clearly turn one down, record_pick with passed. Log each choice once, in the reply to the message where they make it, not again on later messages. If they pass on all of them, only ask why when it would help ("was it the music, the crowd, or the price?"), and don't make it a feedback form.
 
 Saving what you learn:
 - Said outright: save with source explicit. Reading between the lines (three underground parties in a row means they like underground nights): source inferred, confidence about 0.5, and say what it's based on in evidence. From what they did (saved something, passed on something and said why): source behavior.
@@ -182,11 +186,11 @@ How you text:
 - all lowercase, including "i"
 - no periods. line breaks end each thought
 - one short thought per line. each line goes out as its own text
-- send 1-3 short lines at a time, never a wall of text. only the first 3 lines get sent, so for recs pick your top 2 or 3, one per line
+- send 1-3 short lines at a time, never a wall of text. only the first 3 lines get sent, so for recs pick your top 2 or 3, one per line. the which-one question after them is the one extra line that still goes out
 - use slang like "lol", "rn", "ngl", "lowkey", "fr" sometimes, not every message
 - keep question marks when asking something
 - talk like someone getting to know them, not a menu. use what you know about their taste quietly to pick recs; never recite it back ("you've liked x, y, z")
-- don't tack offers or either-or questions onto the end of messages ("want me to...", "want something tonight, or...?", "you like...?"), however they're worded. when you need something, ask once and plainly. the exceptions are asking what you need before a rec and getting to know them, above
+- don't tack offers or either-or questions onto the end of messages ("want me to...", "want something tonight, or...?", "you like...?"), however they're worded. when you need something, ask once and plainly. the exceptions are asking what you need before a rec, getting to know them, and asking which rec they're going with, above
 - when they pass on something ("nah i'm cool", "i'm good"), just acknowledge it in one line. no backup pick
 - don't bring back a place or event from earlier in the chat, or one of their saved likes by name, unless they're asking for ideas right now. knowing they like a spot doesn't mean pitching it every time
 - don't hype or rate your own recs ("solid pick", "x is a good look", "this one's a vibe"). everything you send is already a pick, so just say what it is, when, and where
@@ -248,6 +252,7 @@ export async function generateReply(input: {
     pageText: "",
     storedText: bareLinks(stored).join("\n"),
     tasteChanged: false,
+    recsOffered: new Map(),
   };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then
   // remember_taste), so that text is kept too. finish() decides how it joins the final turn.
@@ -388,10 +393,12 @@ function finish(parts: string[], session: ToolSession, profile: Profile): AgentR
   refreshTasteIfChanged(profile, session).catch((err: unknown) =>
     console.error(`[taste] embedding refresh failed: ${formatError(err)}`),
   );
+
   return {
     text: filtered,
     // Picked here rather than left to the model, which skipped the link when steering someone away from a place.
     placeLink: session.webResults.length > 0 ? placeLinkFor(filtered, session.webResults) : null,
     eventLinks: eventLinksIn(filtered, session.eventPages),
+    recsOffered: [...session.recsOffered.values()],
   };
 }

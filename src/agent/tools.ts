@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { applyProfileUpdate, PROFILE_FIELDS, updateProfile, type ProfilePatch } from "../db/profiles.ts";
+import { recordPick, type ShownRec } from "../db/picks.ts";
 import { listSaves, saveEvent } from "../db/saves.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
 import { TASTE_CATEGORIES, type Profile, type TasteCategory, type TasteKind, type TasteSource } from "../db/types.ts";
@@ -172,6 +173,21 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "record_pick",
+    description:
+      "Log which rec they're going with, or one they turned down. Call it when they say they're going to, picking, or leaning toward a place or event you sent (picked), or clearly say no to one (passed). One call per place.",
+    input_schema: {
+      type: "object",
+      required: ["name", "outcome"],
+      properties: {
+        name: { type: "string", description: "The place or event as you named it, e.g. the shrine" },
+        outcome: { type: "string", enum: ["picked", "passed"] },
+        note: { type: "string", description: "Anything they said about it, e.g. going saturday with the girls, too far" },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
@@ -262,6 +278,8 @@ export type ToolSession = {
   untrusted: boolean;
   /** Their taste or the profile facts it's built from changed, so the taste vector is stale. */
   tasteChanged: boolean;
+  /** Recs searches returned this reply, by id, so the ones the reply names get logged as shown. */
+  recsOffered: Map<string, ShownRec>;
 };
 
 /** Their taste vector for a search, rebuilt first if this reply changed what it's made from. */
@@ -285,8 +303,14 @@ function isExaPage(url: string): boolean {
   }
 }
 
+/** What Claude sees of the recs: everything but the id. */
+function forClaude(recs: RecResult[]): Omit<RecResult, "id">[] {
+  return recs.map(({ id: _id, ...rec }) => rec);
+}
+
 /** A rec's own site can be sent and becomes the place card, like a web result's. */
 function keepRecLinks(recs: RecResult[], session: ToolSession): void {
+  for (const rec of recs) session.recsOffered.set(rec.id, { id: rec.id, name: rec.name, url: rec.url });
   for (const rec of recs) {
     if (!rec.url) continue;
     session.webUrls.add(rec.url);
@@ -320,7 +344,7 @@ export async function runTool(
         keepRecLinks(recs, session);
         return {
           count: recs.length,
-          haps_recs: recs,
+          haps_recs: forClaude(recs),
           hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If none is near where they are or in their budget, call web_search again with live: true instead of sending one that's far. If your answer is about one place that has a url, end with that url alone on the last line.",
         };
       }
@@ -412,7 +436,7 @@ export async function runTool(
         session.eventPages.push(...recs.flatMap((rec) => (rec.url ? [{ title: rec.name, url: rec.url }] : [])));
         return {
           count: recs.length,
-          haps_recs: recs,
+          haps_recs: forClaude(recs),
           hint: "These are recurring nights and venues from Haps's own vetted list, closest match first, not dated listings. Recommend only the ones that fit, and give when as the schedule says it (e.g. saturdays). Never make up a date, a lineup, or say it's on tonight unless the schedule shows that day. If there's no schedule, say it's a spot to check, not that something is on. For one rec that has a url, end with that url alone on the last line.",
         };
       }
@@ -527,6 +551,16 @@ export async function runTool(
       // Who they go with and what they want more of are part of their taste vector.
       if (patch.social || patch.discovery_goal) session.tasteChanged = true;
       return { saved: patch };
+    }
+    case "record_pick": {
+      const pickName = asString(input.name);
+      const outcome = input.outcome === "picked" || input.outcome === "passed" ? input.outcome : undefined;
+      if (!pickName || !outcome) return { error: "name and outcome are required" };
+      if (plantedByPage(pickName, session)) {
+        return { error: "not_from_user", hint: "Only log what the user said they're picking." };
+      }
+      const logged = await recordPick({ profileId: profile.id, name: pickName, outcome, note: asString(input.note) });
+      return { logged: { name: logged.name, outcome } };
     }
     default:
       return { error: `unknown tool ${name}` };
