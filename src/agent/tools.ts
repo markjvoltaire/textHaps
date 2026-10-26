@@ -46,10 +46,20 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "search_events",
     description:
-      "Search ticketing sites (DICE, Posh, Partiful, Eventbrite, RA, Shotgun, Luma) and recent TikTok promo videos live for nights in this city. Recommend only events these pages back up, with the date the page shows. Do not invent events. Do not call until you know their taste and city.",
+      "Search ticketing sites (DICE, Posh, Partiful, Eventbrite, RA, Shotgun, Luma) and recent TikTok promo videos live for nights in this city. Recommend only events these pages back up, with the date the page shows. Do not invent events. Do not call until you know their city, the vibe they want, and their budget: ask first if you don't.",
     input_schema: {
       type: "object",
+      required: ["vibe", "budget"],
       properties: {
+        vibe: {
+          type: "string",
+          description:
+            "How they want the night to feel, from what they told you (this ask or saved), e.g. low-key with good music, packed and rowdy, upscale. Broad likes like parties or good music aren't a vibe",
+        },
+        budget: {
+          type: "string",
+          description: "Their budget, from this ask or their saved normal night out, e.g. around $50, cheap, doesn't matter",
+        },
         city: { type: "string", description: "City to search, e.g. NYC" },
         query: { type: "string", description: "Free-text match on title, description, or vibe" },
         tags: {
@@ -412,6 +422,14 @@ export async function runTool(
       };
     }
     case "search_events": {
+      // A great night that's the wrong vibe or over budget is a bad rec, so both have to be known first.
+      const missing = [!asString(input.vibe) && "vibe", !asString(input.budget) && "budget"].filter(Boolean);
+      if (missing.length) {
+        return {
+          error: "ask_first",
+          hint: `Don't search yet. Ask them about their ${missing.join(" and ")} in one short question first.`,
+        };
+      }
       const taste = await listTaste(profile.id);
       if (!taste.some((signal) => signal.kind === "like")) {
         return {
@@ -428,7 +446,7 @@ export async function runTool(
       }
       session.webSearches += 1;
       const tags = asStringArray(input.tags);
-      const vibe = [asString(input.query), ...(tags ?? [])].filter(Boolean).join(" ") || "party";
+      const vibe = [asString(input.query), asString(input.vibe), ...(tags ?? [])].filter(Boolean).join(" ") || "party";
       const metro = metroFor(city);
       if (RECS_METROS.has(metro)) {
         const recs = await searchRecs(vibe, metro, { categories: NIGHT_CATEGORIES, taste: await currentTaste(profile, session) });

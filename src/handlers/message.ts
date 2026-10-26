@@ -179,7 +179,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // Only commit the exchange once the model actually produced something.
     // Keep only what the user actually sees: the lead plus up to 2 more bubbles, and a closing
     // question (which rec they're going with) after them. A line that is
-    // only a link goes out as one rich link card before them, so it doesn't take a text slot.
+    // only a link goes out as a rich link card instead, so it doesn't take a text slot.
     // The links note is only for history; if Claude copies one into a reply, it never goes out.
     const lines = reply
       .split(/\n+/)
@@ -190,10 +190,24 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     const texts = lines.filter((line) => !BARE_URL.test(line));
     const closing = texts.length > 3 && texts.at(-1)!.endsWith("?") ? [texts.at(-1)!] : [];
     const bubbles = [...texts.slice(0, 3), ...closing];
-    const sent = [...(link ? [link] : []), ...bubbles].join("\n");
-    span.update({ output: sent, metadata: { platform, richlink: Boolean(link) } });
+    // What goes out, in order. One place: its card first. Several recs: each rec's card right
+    // before the text about it, so every pick that has a page gets one.
+    const plan: { card?: string; text?: string }[] = [];
+    if (link) plan.push({ card: link });
+    const carded = new Set(link ? [link] : []);
+    for (const bubble of bubbles) {
+      for (const rec of recsNamedIn(bubble, recsOffered)) {
+        if (rec.url && !carded.has(rec.url)) {
+          carded.add(rec.url);
+          plan.push({ card: rec.url });
+        }
+      }
+      plan.push({ text: bubble });
+    }
+    const sent = plan.map((item) => item.card ?? item.text).join("\n");
+    span.update({ output: sent, metadata: { platform, richlinks: carded.size } });
     // Event pages the reply named but didn't send, so a follow-up ("can you rsvp") can still send the link.
-    const unsent = eventLinks.filter((item) => item.url !== link);
+    const unsent = eventLinks.filter((item) => !carded.has(item.url));
     const remembered = unsent.length
       ? `${sent}\n${LINKS_NOTE} ${unsent.map((item) => `${item.title} ${item.url}`).join(" · ")})`
       : sent;
@@ -206,24 +220,23 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     });
 
     console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)}`);
-    // The place's card goes first so they see it, then the texts explain it. Photon builds the
-    // preview before confirming, which once took 30s and then failed, so it's capped to keep it
-    // from holding up the texts; it's not retried, since it may still land.
-    if (link) {
-      await withTimeout(traced("rich link", () => space.send(richlink(link))), RICHLINK_TIMEOUT_MS, "rich link").catch(
-        (err: unknown) => console.warn(`[richlink] send failed for sender=${senderId}:`, formatError(err)),
-      );
-    }
-    // Short texts, not one block: each line goes out as its own bubble.
-    const [lead, ...rest] = bubbles;
-    // No pauses between bubbles: each send already takes a couple of seconds to confirm.
-    if (lead) {
-      await traced("lead", () => space.send(lead));
-    }
-    // What the user actually waited for, from the message arriving to the first text they see.
-    span.update({ metadata: { firstBubbleMs: Date.now() - receivedAt } });
-    for (const bubble of rest) {
-      await traced("bubble", () => space.send(bubble));
+    // No pauses between sends: each already takes a couple of seconds to confirm. Photon builds a
+    // card's preview before confirming, which once took 30s and then failed, so each card is
+    // capped to keep it from holding up the texts; it's not retried, since it may still land.
+    let firstText = true;
+    for (const item of plan) {
+      if (item.card) {
+        const card = item.card;
+        await withTimeout(traced("rich link", () => space.send(richlink(card))), RICHLINK_TIMEOUT_MS, "rich link").catch(
+          (err: unknown) => console.warn(`[richlink] send failed for sender=${senderId}:`, formatError(err)),
+        );
+      } else if (item.text) {
+        const text = item.text;
+        await traced(firstText ? "lead" : "bubble", () => space.send(text));
+        // What the user actually waited for, from the message arriving to the first text they see.
+        if (firstText) span.update({ metadata: { firstBubbleMs: Date.now() - receivedAt } });
+        firstText = false;
+      }
     }
   });
   await flushTracing();
