@@ -1,5 +1,6 @@
 import { getRecs, matchRecs, type RecRow } from "../db/recs.ts";
 import { embedQuery } from "./embed.ts";
+import { withTaste } from "./taste.ts";
 
 /** The embedding model takes ~400 MB, more than a 512 MB worker has room for. RECS_SEARCH=off turns it and recs search off. */
 export const RECS_SEARCH_ON = process.env.RECS_SEARCH !== "off";
@@ -15,13 +16,13 @@ export type RecResult = Pick<
   "name" | "category" | "neighborhood" | "address" | "url" | "why" | "best_for" | "vibe" | "music" | "crowd" | "price" | "schedule"
 >;
 
-/** The approved recs closest in meaning to the ask, nearest first. */
+/** The approved recs closest in meaning to the ask, nearest first, nudged toward their taste when there is one. */
 export async function searchRecs(
   query: string,
   metro: string,
-  options: { categories?: string[]; limit?: number } = {},
+  options: { categories?: string[]; limit?: number; taste?: number[] } = {},
 ): Promise<RecResult[]> {
-  const matches = await matchRecs(await embedQuery(query), { metro, categories: options.categories, limit: options.limit ?? 8 });
+  const matches = await matchRecs(withTaste(await embedQuery(query), options.taste), { metro, categories: options.categories, limit: options.limit ?? 8 });
   const rows = new Map((await getRecs(matches.map((match) => match.id))).map((row) => [row.id, row]));
   return matches.flatMap((match) => {
     const row = rows.get(match.id);

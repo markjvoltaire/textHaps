@@ -1,13 +1,7 @@
 import { getSupabase } from "./client.ts";
 import type { OnboardingField, Profile, TasteSignal } from "./types.ts";
 
-export type ProfilePatch = {
-  name?: string;
-  city?: string;
-  area?: string;
-  email?: string;
-  full_name?: string;
-};
+export type ProfilePatch = Partial<Record<(typeof PROFILE_FIELDS)[number], string>>;
 
 export async function upsertProfile(platform: string, platformUserId: string): Promise<Profile> {
   const sb = getSupabase();
@@ -54,43 +48,62 @@ export async function updateProfile(profileId: string, patch: ProfilePatch): Pro
   return data as Profile;
 }
 
-/** Onboarding is done once we know their taste (vibe, music, places) and city. Name is optional. */
+/** The basics before Haps can recommend well: how they found Haps, their city, and one thing they like. Name is optional. */
 export function missingOnboarding(profile: Profile, taste: TasteSignal[]): OnboardingField[] {
   const missing: OnboardingField[] = [];
-  if (!taste.some((signal) => signal.kind === "like")) missing.push("taste");
+  if (!profile.found_us?.trim()) missing.push("found_us");
   if (!profile.city?.trim()) missing.push("city");
+  if (!taste.some((signal) => signal.kind === "like")) missing.push("taste");
   return missing;
-}
-
-export function nextOnboardingField(profile: Profile, taste: TasteSignal[]): OnboardingField | null {
-  return missingOnboarding(profile, taste)[0] ?? null;
 }
 
 export function isOnboarded(profile: Profile, taste: TasteSignal[]): boolean {
   return missingOnboarding(profile, taste).length === 0;
 }
 
-export function applyProfileUpdate(profile: Profile, updated: Profile): void {
-  profile.name = updated.name;
-  profile.city = updated.city;
-  profile.area = updated.area;
-  profile.email = updated.email;
-  profile.full_name = updated.full_name;
+/** Which of the ten things onboarding learns are still unknown, for Claude to pick the next question from. */
+export function unknownTopics(profile: Profile, taste: TasteSignal[]): string[] {
+  const has = (...categories: string[]) => taste.some((signal) => signal.category && categories.includes(signal.category));
+  const topics: [string, boolean][] = [
+    ["where they go out (city, neighborhoods)", Boolean(profile.city && (profile.area || profile.neighborhoods))],
+    ["how far they'll travel", Boolean(profile.travel)],
+    ["what they like doing (parties, food, live music, comedy...)", has("activity")],
+    ["specific tastes (music, food, scenes)", has("music", "food", "scene")],
+    ["the vibe they want", has("vibe")],
+    ["budget for a normal night", Boolean(profile.budget)],
+    ["who they go out with", Boolean(profile.social) || has("social")],
+    ["when they go out and how they plan", Boolean(profile.going_out) || has("timing")],
+    ["dealbreakers", taste.some((signal) => signal.kind === "dislike" || signal.kind === "constraint")],
+    ["favorite places and why", has("place")],
+    ["what they want Haps to make better", Boolean(profile.discovery_goal) || has("goal")],
+  ];
+  return topics.filter(([, known]) => !known).map(([topic]) => topic);
 }
+
+export function applyProfileUpdate(profile: Profile, updated: Profile): void {
+  for (const field of PROFILE_FIELDS) profile[field] = updated[field];
+}
+
+/** What update_profile can change. */
+export const PROFILE_FIELDS = [
+  "name",
+  "full_name",
+  "email",
+  "city",
+  "area",
+  "neighborhoods",
+  "travel",
+  "budget",
+  "going_out",
+  "social",
+  "discovery_goal",
+  "found_us",
+] as const satisfies readonly (keyof Profile)[];
 
 export async function markBackgroundCleared(profileId: string): Promise<void> {
   const { error } = await getSupabase()
     .from("profiles")
     .update({ background_set_at: null })
-    .eq("id", profileId);
-
-  if (error) throw error;
-}
-
-export async function markContactCardSent(profileId: string): Promise<void> {
-  const { error } = await getSupabase()
-    .from("profiles")
-    .update({ contact_card_sent_at: new Date().toISOString() })
     .eq("id", profileId);
 
   if (error) throw error;

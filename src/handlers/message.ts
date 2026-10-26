@@ -1,13 +1,10 @@
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
-import { attachment, contact, richlink, type Message, type Space } from "spectrum-ts";
-import { background, nativeContactCard } from "spectrum-ts/providers/imessage";
+import { attachment, richlink, type Message, type Space } from "spectrum-ts";
+import { background } from "spectrum-ts/providers/imessage";
 import { generateReply, LINKS_NOTE } from "../agent/claude.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
-import { markBackgroundCleared, markContactCardSent, upsertProfile } from "../db/profiles.ts";
+import { markBackgroundCleared, upsertProfile } from "../db/profiles.ts";
 import type { Profile } from "../db/types.ts";
 import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
@@ -47,8 +44,6 @@ function audioOf(content: Message["content"]): Audio | undefined {
   if (content.type === "attachment" && content.mimeType.startsWith("audio/")) return content;
   return undefined;
 }
-const ASSETS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "assets");
-const ICON_PATH = join(ASSETS_DIR, "haps-icon.jpg");
 
 /** Clears the Haps chat background from threads that got one earlier. A failure never blocks the reply. */
 async function clearBackground(space: Space, profile: Profile): Promise<void> {
@@ -59,35 +54,6 @@ async function clearBackground(space: Space, profile: Profile): Promise<void> {
     console.log(`[background] cleared for sender=${profile.platform_user_id}`);
   } catch (err) {
     console.warn(`[background] clear failed for sender=${profile.platform_user_id}:`, formatError(err));
-  }
-}
-
-/**
- * Once per person: shares Haps's iMessage name and photo (set on the Photon project
- * profile), which shows "Maybe: Haps" and an Add banner, then sends a Haps contact
- * card with the icon when HAPS_PHONE_NUMBER is set. A failure never blocks the reply.
- */
-async function ensureContactCard(space: Space, profile: Profile): Promise<void> {
-  if (profile.platform !== "imessage" || profile.contact_card_sent_at) return;
-  try {
-    await traced("native contact card", () => space.send(nativeContactCard()));
-    // Marked now so a failing card send below can't re-send the native card on every reply.
-    await markContactCardSent(profile.id);
-    const phone = process.env.HAPS_PHONE_NUMBER;
-    if (phone) {
-      await traced("contact card", () =>
-        space.send(
-          contact({
-            name: { first: "Haps" },
-            phones: [{ value: phone, type: "mobile" }],
-            photo: { mimeType: "image/jpeg", read: () => readFile(ICON_PATH) },
-          }),
-        ),
-      );
-    }
-    console.log(`[contact] shared with sender=${profile.platform_user_id} card=${Boolean(phone)}`);
-  } catch (err) {
-    console.warn(`[contact] failed for sender=${profile.platform_user_id}:`, formatError(err));
   }
 }
 
@@ -249,8 +215,6 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     for (const bubble of rest.slice(0, 2)) {
       await traced("bubble", () => space.send(bubble));
     }
-    // After the first reply, not before it, so the chat opens with Haps talking.
-    await ensureContactCard(space, profile);
   });
   await flushTracing();
 }
