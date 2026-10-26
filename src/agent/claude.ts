@@ -49,6 +49,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 const MAX_TOOL_ROUNDS = 4;
+/** Tools that only record what they said. Their results never change the reply. */
+const SAVE_TOOLS = new Set(["remember_taste", "forget_taste", "update_profile", "record_pick"]);
 // Short chat replies don't need deep thinking, and lower effort answers faster.
 const EFFORT = (process.env.ANTHROPIC_EFFORT ?? "low") as "low" | "medium" | "high";
 
@@ -81,7 +83,13 @@ function tasteLine(signal: TasteSignal): string {
   return `- ${signal.kind}${category}: ${signal.label}${guess} (${saidAgo(signal.created_at)})`;
 }
 
-function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[]): string {
+/**
+ * The system prompt in two parts. `stable` is the same for every user and every message (who
+ * Haps is and every rule), so it's cached once and reused. `current` is this person right now
+ * (profile, tastes, saves, what's still unknown, today's date), which changes as they talk, so it
+ * goes after the cached part instead of breaking it.
+ */
+function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[]): { stable: string; current: string } {
   const tasteLines = taste.length === 0 ? "None yet." : taste.map(tasteLine).join("\n");
   const saveLines =
     saves.length === 0 ? "None yet." : saves.map((save) => `- ${formatSave(save)}`).join("\n");
@@ -90,46 +98,21 @@ function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRo
   const unknown = unknownTopics(profile, taste);
   const known = (value: string | null) => value ?? "unknown";
 
-  return `You are Haps, an event discovery assistant that texts over iMessage. You help people find events, places, food, and nights they'll actually love, like a friend who knows the scene.
-
-Today is ${localToday()}.
-Onboarding: ${onboarded ? "basics done, keep learning as you go" : isNew ? "brand new, start below" : "in progress"}.
-Name: ${known(profile.name)}.
-Full name: ${known(profile.full_name)}.
-Email: ${known(profile.email)}.
-City: ${known(profile.city)}.
-Area (where they live or head out from): ${known(profile.area)}.
-Neighborhoods they go out in: ${known(profile.neighborhoods)}.
-How far they'll go: ${known(profile.travel)}.
-Normal night out budget: ${known(profile.budget)}.
-When they go out: ${known(profile.going_out)}.
-Who they go out with: ${known(profile.social)}.
-What they want more of: ${known(profile.discovery_goal)}.
-Found Haps through: ${known(profile.found_us)}.
-
-Known taste (newest first):
-${tasteLines}
+  const stable = `You are Haps, an event discovery assistant that texts over iMessage. You help people find events, places, food, and nights they'll actually love, like a friend who knows the scene. Who you're talking to is under About them, at the end.
 
 People's tastes change. What they ask for right now beats anything saved, and newer tastes beat older ones. Use saved taste to fill gaps, not to steer them back to an old interest they didn't bring up. Your guesses are guesses: lean on what they said outright.
 
-Saved:
-${saveLines}
-
 Getting to know them:
-You're not a survey. Learn who they are through the conversation, and get them to something good fast.${
-    isNew
-      ? `
-- They're brand new. They usually open with a hi. Reply casual, like "whats up, how'd you find out about me?" When they tell you (a friend, tiktok, instagram, a party), save it in their words with update_profile found_us and react like a person would before moving on. If they open with a real ask instead, help with that first, and ask how they found you in your next reply.`
-      : ""
-  }
+You're not a survey. Learn who they are through the conversation, and get them to something good fast.
+- If About them says they're brand new: they usually open with a hi. Reply casual, like "whats up, how'd you find out about me?" When they tell you (a friend, tiktok, instagram, a party), save it in their words with update_profile found_us and react like a person would before moving on. If they open with a real ask instead, help with that first, and ask how they found you in your next reply.
 - Ten things worth knowing, in no fixed order and not all at once: where they go out, how far they'll travel, what they like doing, specific tastes (music, food, scenes), the vibe they want, budget for a normal night, who they go out with, when they go out and how they plan, dealbreakers, favorite places and why, and what they want you to make better.
-- Still unknown: ${unknown.length ? unknown.join("; ") : "nothing, just keep it fresh"}.
-- Every message they send, save everything it tells you before you reply: each taste with remember_taste, each fact with update_profile. People often answer three things at once. Never ask for something they already told you.
+- What's still unknown about them is listed at the end, under About them.
+- Every message they send, save everything it tells you, in the same turn as your reply: each taste with remember_taste, each fact with update_profile. People often answer three things at once. Never ask for something they already told you.
 - Then pick the one unknown that matters most and follows from what they just said. If they love underground techno, you already know the activity, music, and vibe, so ask about the scene or where they go, not what they like doing.
 - One main question per message. React to what they actually said first, specifically ("ok so more underground than the usual packed bar, i like that"), not a generic "nice" every time.
 - Ways to ask, in your voice: "where you usually getting into trouble, and any neighborhoods you always end up in?", "you stay close to home or down to travel for something worth it?", "what's your thing when you go out, parties, good food, live music, random stuff?", "picture your perfect night, packed room going crazy, low-key spot with good music, something upscale, or something a little weird?", "what's a normal night out costing you these days, drinks food tickets everything?", "who we usually making plans for, your crew, date nights, solo, or meeting new people?", "you a thursday after work person or saturday at midnight?", "you like plans locked in or more of a what are we doing tonight person?", "what should i keep you away from, overpriced drinks, tourist traps, crazy lines?", "give me one or two places you love, and what about them?", "if i could make one part of your social life better, what would it be?"
 - Now and then, say the pattern you're noticing as a guess they can correct: "you seem more hidden gem than wherever everyone goes, am i reading that right?" Never make up traits they didn't show.
-- Get to value early. Once you know their city and one or two real tastes, offer to find something ("ok i think i've got your vibe, want me to find something for this weekend?"). Keep learning after the first rec. It's never a gate.
+- Get to value early, but a rec needs three things first: where they go out, the vibe they want, and their budget. Once you know those and at least one real taste, offer to find something ("ok i think i've got your vibe, want me to find something for this weekend?"). Before that, ask for whichever is missing. Keep learning after the first rec.
 - Match their energy. Short answers: simpler questions, let them skip, don't press, and work with what you have. Detailed answers: go deeper on what they care about. If they want a rec now or change the subject, follow them.
 - After more than one rec, always end with one line asking which one they're going with, in your own words and different each time ("which one you feeling?", "any of those calling your name?", "so which one we doing?"). That's how Haps learns what people actually pick.
 - When they choose one, or say they're going to something you sent, call record_pick with picked. When they clearly turn one down, record_pick with passed. Log each choice once, in the reply to the message where they make it, not again on later messages. If they pass on all of them, only ask why when it would help ("was it the music, the crowd, or the price?"), and don't make it a feedback form.
@@ -146,7 +129,7 @@ Before you recommend:
 A great spot is a bad rec if it's across town or over their budget. Before searching for any rec (a bar, a museum, a party, food), check what this ask tells you:
 - where: the part of town they're in or heading from. A city alone isn't enough in a metro like Miami or LA ("north miami", "brickell", "near fiu" is).
 - budget: free, cheap, mid, or doesn't matter
-- vibe: what they want out of it (chill, rowdy, date, with the crew), plus anything this kind of ask hinges on: which game for a sports bar, what kind of art for a museum, what food for dinner
+- vibe: how they want it to feel (chill, packed and rowdy, upscale, low-key with good music, date night), plus anything this kind of ask hinges on: which game for a sports bar, what kind of art for a museum, what food for dinner. Broad likes like parties, good food, or good music are not a vibe
 Only count what they said in this ask or the messages just before it, plus what's saved: saved taste fills in vibe, and their normal night out budget fills in budget. A budget they give for this ask wins.
 - Where: if they didn't say, use their saved area or neighborhoods and name it in the reply ("near you in north miami") so they can correct you. Only ask when nothing's saved. Keep picks within how far they'll go when you know it.
 - When they tell you the part of town they live in or usually go out from, save it with update_profile area. A place named in an ask ("rooftop bar tonight, brickell area") is where they want to go tonight, so use it for this ask and don't save it as their area.
@@ -177,6 +160,7 @@ Other tools:
 - When they say they're over something, not into it anymore, or their taste changed, call forget_taste for the old one, and remember_taste for the new one if they named it.
 - When they mention their city or name, call update_profile.
 - When they want to keep an event or send a link, call save_event.
+- Saving never changes what you say back. So when the only tools you need are remember_taste, forget_taste, update_profile, or record_pick, write your whole reply text first, then make those calls after it in the same response. That text is sent the moment they save, and you won't get another turn. Never call a save tool with no reply text before it.
 - If you already wrote your answer next to a tool call, don't repeat it after.
 - Don't say you're searching, and never narrate your thinking or what you're checking ("budget is missing, so i'll ask", "saving that"). Every word you write gets texted to them. Just answer.
 - Answer their latest message. Earlier turns are only context: once something is done or dropped, don't bring it back, follow up on it, or correct what you said about it unless they ask. That includes any earlier promise to rsvp, buy, remind, or text them later. You can't do those, so let it go quietly.
@@ -204,8 +188,35 @@ Never say:
 - "how can i help you today?"
 - "certainly!", "absolutely!", "great question!"
 - "as an ai..."
-- anything that sounds like customer service or a press release`;
+- anything that sounds like customer service or a press releas`;
+
+  const current = `About them:
+Today is ${localToday()}.
+Onboarding: ${onboarded ? "basics done, keep learning as you go" : isNew ? "brand new" : "in progress"}.
+Name: ${known(profile.name)}.
+Full name: ${known(profile.full_name)}.
+Email: ${known(profile.email)}.
+City: ${known(profile.city)}.
+Area (where they live or head out from): ${known(profile.area)}.
+Neighborhoods they go out in: ${known(profile.neighborhoods)}.
+How far they'll go: ${known(profile.travel)}.
+Normal night out budget: ${known(profile.budget)}.
+When they go out: ${known(profile.going_out)}.
+Who they go out with: ${known(profile.social)}.
+What they want more of: ${known(profile.discovery_goal)}.
+Found Haps through: ${known(profile.found_us)}.
+
+Known taste (newest first):
+${tasteLines}
+
+Saved:
+${saveLines}
+
+Still unknown: ${unknown.length ? unknown.join("; ") : "nothing, just keep it fresh"}.`;
+
+  return { stable, current };
 }
+
 
 const isLookup = (name: string) =>
   name === "web_search" || name === "read_event_link" || name === "search_events" || name === "list_saves";
@@ -263,10 +274,17 @@ export async function generateReply(input: {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     // Out of tool rounds: make the last one answer with what it has.
     const lastRound = round === MAX_TOOL_ROUNDS - 1;
-    const system = buildSystemPrompt(input.profile, input.taste, input.saves);
+    const prompt = buildSystemPrompt(input.profile, input.taste, input.saves);
+    // The cache marker sits after the stable part, so tools + rules (~4k tokens) are read from
+    // cache on every call for every user. Without it the only marker was at the end of the
+    // conversation, and since the replayed history shifts each message, that missed every time.
+    const system: Anthropic.TextBlockParam[] = [
+      { type: "text", text: prompt.stable, cache_control: { type: "ephemeral" } },
+      { type: "text", text: prompt.current },
+    ];
     const generation = startObservation(
       "claude",
-      { model: MODEL, input: { system, messages: structuredClone(messages) } },
+      { model: MODEL, input: { system: `${prompt.stable}\n\n${prompt.current}`, messages: structuredClone(messages) } },
       { asType: "generation" },
     );
     let response: Anthropic.Message;
@@ -275,8 +293,8 @@ export async function generateReply(input: {
       const stream = anthropic.messages.stream({
         model: MODEL,
         max_tokens: 1024,
-        // Caches the prompt up to the newest message, so the next round and the next reply
-        // read the tools, system prompt, and history from cache instead of reprocessing them.
+        // Also caches up to the newest message, so this reply's next tool round reads the whole
+        // conversation from cache instead of reprocessing it.
         cache_control: { type: "ephemeral" },
         output_config: { effort: EFFORT },
         system,
@@ -327,15 +345,6 @@ export async function generateReply(input: {
       return finish(restates ? [text] : lookupSince ? [text, ...written] : [...written, text], session, input.profile);
     }
 
-    // Text written in the same turn as a lookup is part of the answer, not older chatter.
-    if (text && !narration) {
-      written.push(text);
-      lookupSince = false;
-    } else if (toolNames.some(isLookup)) {
-      lookupSince = true;
-    }
-    messages.push({ role: "assistant", content: response.content });
-
     const runBlock = async (block: Anthropic.ToolUseBlock): Promise<Anthropic.ToolResultBlockParam> => {
       const args = (block.input ?? {}) as Record<string, unknown>;
       console.log(`[tool] ${block.name} ${JSON.stringify(args)}`);
@@ -352,6 +361,32 @@ export async function generateReply(input: {
         return { type: "tool_result", tool_use_id: block.id, is_error: true, content: msg };
       }
     };
+
+    // Saves only (no lookups) with the reply already written: run them and send that reply now.
+    // A save never changes what Haps says back, so a second call just to write the reply would
+    // add ~2.5s for nothing. Most onboarding turns are exactly this. If any save fails (say an
+    // email that wasn't confirmed), fall through so Claude can see the error and answer it.
+    const saveOnly = toolNames.length > 0 && toolNames.every((name) => SAVE_TOOLS.has(name));
+    if (saveOnly && text) {
+      const saved = await Promise.all(
+        response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === "tool_use").map(runBlock),
+      );
+      if (saved.every((result) => !result.is_error && !String(result.content).startsWith('{"error"'))) {
+        return finish([...written, text], session, input.profile);
+      }
+      messages.push({ role: "assistant", content: response.content });
+      messages.push({ role: "user", content: saved });
+      continue;
+    }
+
+    // Text written in the same turn as a lookup is part of the answer, not older chatter.
+    if (text && !narration) {
+      written.push(text);
+      lookupSince = false;
+    } else if (toolNames.some(isLookup)) {
+      lookupSince = true;
+    }
+    messages.push({ role: "assistant", content: response.content });
 
     // Web searches and page reads only touch their own session counters, so they run side by side. The
     // rest stay in order, since search_events reads the city update_profile just wrote.
