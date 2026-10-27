@@ -22,12 +22,26 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
       type: "object",
       properties: {
         query: { type: "string", description: "What to look for, with the city and neighborhood, e.g. natural wine bar brooklyn" },
+        purpose: {
+          type: "string",
+          enum: ["recommend", "look_up"],
+          description: "recommend: finding places for them to go. look_up: facts about a place they named (hours, menu, is it open)",
+        },
+        spot_vibe: {
+          type: "string",
+          description:
+            "For recommend: the kind of spot they want for this ask, from what they told you, e.g. classy sit-down, low-key, lively, date night. A vibe they gave for a night out or a different ask doesn't count",
+        },
+        craving: {
+          type: "string",
+          description: "For recommend when it's food: what they're in the mood to eat, e.g. tacos, sushi, anything good",
+        },
         live: {
           type: "boolean",
           description: "Search the live web instead of Haps's recs. Only after the recs came back with nothing near them or in their budget.",
         },
       },
-      required: ["query"],
+      required: ["query", "purpose"],
       additionalProperties: false,
     },
   },
@@ -341,6 +355,9 @@ function keepRecLinks(recs: RecResult[], session: ToolSession): void {
   }
 }
 
+/** Asks about eating, which also need what they're craving before a search. */
+const FOOD_ASK = /\b(eat|eats|food|hungry|dinner|lunch|brunch|breakfast|restaurant|restaurants|bite|snack|cuisine)\b/i;
+
 /** Each web search costs a tool round, so cap them to leave room for an answer. */
 const MAX_WEB_SEARCHES = 3;
 /** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
@@ -356,6 +373,18 @@ export async function runTool(
     case "web_search": {
       const query = asString(input.query);
       if (!query) return { error: "query is required" };
+      // A place rec is only as good as its fit, so the kind of spot (and for food, what they're
+      // craving) has to come from them first, like vibe and budget do for search_events.
+      if (input.purpose !== "look_up") {
+        const food = FOOD_ASK.test(`${query} ${session.userMessage}`);
+        const missing = [!asString(input.spot_vibe) && "the kind of spot they want", food && !asString(input.craving) && "what they're craving"].filter(Boolean);
+        if (missing.length) {
+          return {
+            error: "ask_first",
+            hint: `Don't search yet. Ask them ${missing.join(" and ")} in one short question first, e.g. "what you craving, and you thinking classy sit-down or a low-key spot?"`,
+          };
+        }
+      }
       if (session.webSearches >= MAX_WEB_SEARCHES) {
         return { error: "search_limit", hint: "No more searches this reply. Answer with what you already found." };
       }
