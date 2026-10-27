@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { startObservation } from "@langfuse/tracing";
 import { fetchPages } from "../search/exa.ts";
+import { INSTAGRAM_POST, instagramPost } from "../search/monid.ts";
 import { formatError } from "../utils/text.ts";
 import { LINK, normalizeLink, stripLinks } from "./links.ts";
 
@@ -21,9 +22,11 @@ export type EventDetails = {
   city: string | null;
   price_note: string | null;
   age: string | null;
+  /** One plain sentence on what it is (music, vibe, who's playing), for the rec it becomes. */
+  summary: string | null;
 };
 
-const FIELDS = ["title", "starts_at", "ends_at", "venue", "address", "city", "price_note", "age"] as const;
+const FIELDS = ["title", "starts_at", "ends_at", "venue", "address", "city", "price_note", "age", "summary"] as const;
 
 const SCHEMA = {
   type: "object",
@@ -39,7 +42,7 @@ const systemPrompt = (today: string) => `You pull event details out of a web pag
 
 Today's date is ${today}. If the page gives no year, use the next upcoming date, never a past year.
 
-Set is_event to false if the page isn't about a specific event, or is a login wall or error page. Use null for anything the page doesn't say; never guess. starts_at and ends_at are ISO 8601 date-times in the venue's local time with that place's UTC offset, like 2026-11-07T20:00:00-05:00. If the page gives a date but no time, starts_at is just the date, like 2026-11-07. Use null if the date isn't clear. price_note is only the price as the page states it, like "$20", "free with RSVP", or "from $15". Use null when no price is stated; never describe what is missing or add your own notes. age is the age limit as the page states it, like "21+" or "18+", or null. Page titles on posh.vip look like "Event | Host | Date | Venue": the host is who throws it, not the venue, and the last part is the venue. Keep each field short and plain text with no links.`;
+Set is_event to false if the page isn't about a specific event, or is a login wall or error page. Use null for anything the page doesn't say; never guess. starts_at and ends_at are ISO 8601 date-times in the venue's local time with that place's UTC offset, like 2026-11-07T20:00:00-05:00. If the page gives a date but no time, starts_at is just the date, like 2026-11-07. Use null if the date isn't clear. price_note is only the price as the page states it, like "$20", "free with RSVP", or "from $15". Use null when no price is stated; never describe what is missing or add your own notes. age is the age limit as the page states it, like "21+" or "18+", or null. summary is one plain sentence on what the event is, from the page: the music, the vibe, who's playing or hosting. Use null if the page doesn't say. Page titles on posh.vip look like "Event | Host | Date | Venue": the host is who throws it, not the venue, and the last part is the venue. Keep each field short and plain text with no links.`;
 
 /** The http(s) links the user sent in this message, as written minus trailing punctuation, capped. Links from earlier chat don't count. */
 export function eventLinksIn(message: string): string[] {
@@ -188,6 +191,7 @@ export async function extractEvent(pageTitle: string, pageText: string, url = ""
       city: cleanField(parsed.city),
       price_note: price && !PRICE_COMMENTARY.test(price) ? price : null,
       age: cleanField(parsed.age),
+      summary: cleanField(parsed.summary),
     };
   } catch (err) {
     generation.update({ level: "ERROR", statusMessage: formatError(err) }).end();
@@ -195,10 +199,19 @@ export async function extractEvent(pageTitle: string, pageText: string, url = ""
   }
 }
 
+/** Instagram shows scrapers a login wall, so a post is read from its caption instead of its page. */
+async function fetchPage(url: string): Promise<{ title: string; text: string } | undefined> {
+  if (!INSTAGRAM_POST.test(url)) return (await fetchPages([url]))[0];
+  const post = await instagramPost(url);
+  if (!post) return undefined;
+  const lines = [`Posted ${post.posted} by ${post.name ? `${post.name} (@${post.author})` : `@${post.author}`}`, post.location && `Tagged location: ${post.location}`, "", post.caption];
+  return { title: `${post.name || `@${post.author}`} on Instagram`, text: lines.filter((line) => line !== null).join("\n") };
+}
+
 /** Read an event page. Null means it couldn't be read or isn't a dated event, so Haps asks the user instead. */
 export async function readEventPage(url: string): Promise<EventDetails | null> {
   try {
-    const [page] = await fetchPages([url]);
+    const page = await fetchPage(url);
     // Login walls (Instagram often) come back near-empty.
     if (!page || page.text.length < 40) return null;
     const event = await extractEvent(page.title, page.text, url);

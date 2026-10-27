@@ -137,6 +137,33 @@ export async function searchInstagramHashtag(hashtag: string, deadlineMs = 20000
   });
 }
 
+export type InstagramPostPage = {
+  author: string;
+  /** The account's display name, often the party's own name. */
+  name: string;
+  posted: string;
+  caption: string;
+  location: string | null;
+};
+
+/** An Instagram post or reel link, the kind instagram.post can read. Profile links name no post. */
+export const INSTAGRAM_POST = /^https?:\/\/(?:www\.)?instagram\.com\/(?:[A-Za-z0-9_.]+\/)?(?:p|reel|reels|tv)\/[A-Za-z0-9_-]+\/?(?:[?#].*)?$/i;
+
+/** One Instagram post by its link, or null when it has no caption to read. Instagram walls off the page itself. */
+export async function instagramPost(url: string, deadlineMs = 8000): Promise<InstagramPostPage | null> {
+  // chameleon is the fastest route that stays up (~1.3s median).
+  const data = await runMonid<RawInstagramPost & { owner?: string; displayName?: string | null }>("/instagram.post", { url, route: "chameleon" }, deadlineMs);
+  const caption = data?.caption?.trim() ?? "";
+  if (!caption) return null;
+  return {
+    author: data?.owner ?? "",
+    name: data?.displayName?.trim() ?? "",
+    posted: new Date((data?.createdUtc ?? 0) * 1000).toISOString().slice(0, 10),
+    caption,
+    location: data?.locationName ?? null,
+  };
+}
+
 /** A TikTok account's public profile, or null when the handle doesn't exist. */
 export async function tiktokProfile(handle: string, deadlineMs = 8000): Promise<TikTokProfile | null> {
   const data = await runMonid<RawProfile>("/tiktok.profile", { handle, route: "bison" }, deadlineMs);

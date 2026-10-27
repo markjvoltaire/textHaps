@@ -153,7 +153,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         getHistory(profile.id),
       ]);
       const generated = await propagateAttributes({ userId: profile.id, sessionId: profile.id }, () =>
-        generateReply({ profile, taste, saves, history, userMessage: text, onWebSearch }),
+        generateReply({ profile, taste, saves, history, userMessage: text, spaceId: space.id, onWebSearch }),
       );
       // Typing must start before the answer lands, or the dots can linger after it.
       await searchingNotice;

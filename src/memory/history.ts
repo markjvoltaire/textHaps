@@ -41,6 +41,15 @@ export async function appendExchange(
   if (error) throw error;
 }
 
+/** A text Haps sent first (a reminder), with no user turn before it. */
+export async function appendAssistantTurn(profileId: string, handle: string, assistant: string): Promise<void> {
+  const { error } = await getSupabase()
+    .from("chat_turns")
+    .insert({ profile_id: profileId, handle, role: "assistant", content: assistant });
+
+  if (error) throw error;
+}
+
 /** How many messages this profile has sent since `since`. Backs the per-number rate limit. */
 export async function countUserTurnsSince(profileId: string, since: Date): Promise<number> {
   const { count, error } = await getSupabase()

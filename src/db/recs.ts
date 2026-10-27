@@ -19,6 +19,8 @@ export type RecDraft = {
   vouched_by: string[];
   sources: string[];
   status?: RecStatus;
+  /** The user who sent Haps the link, for recs that came from a chat. */
+  submitted_by?: string | null;
 };
 
 export type RecRow = RecDraft & { id: string; key: string; status: RecStatus; created_at: string; url_checked_at: string | null };

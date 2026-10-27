@@ -1,7 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { applyProfileUpdate, PROFILE_FIELDS, updateProfile, type ProfilePatch } from "../db/profiles.ts";
 import { recordPick, type ShownRec } from "../db/picks.ts";
-import { listSaves, saveEvent } from "../db/saves.ts";
+import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
+import { scheduleReminders, zoneFor } from "../reminders/schedule.ts";
+import { saveSharedRec } from "../recs/shared.ts";
+import { PROVIDER } from "../utils/provider.ts";
+import { formatError } from "../utils/text.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
 import { TASTE_CATEGORIES, type Profile, type TasteCategory, type TasteKind, type TasteSource } from "../db/types.ts";
 import { searchEventPages, searchWeb, type WebResult } from "../search/exa.ts";
@@ -10,7 +14,7 @@ import { searchTikTokVideos } from "../search/monid.ts";
 import { NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
 import { refreshTasteEmbedding, tasteVector } from "../search/taste.ts";
 import { knownMetro, metroFor } from "../utils/metro.ts";
-import { describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
+import { cleanStart, describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
 import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
@@ -137,14 +141,38 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "save_event",
-    description: "Save an event so Haps can remember it later. Pass its page url from search_events, or a link the user sent.",
+    description:
+      "Save an event so Haps remembers it. With remind: true, Haps also texts them before it: a check-in a couple of days out and a heads-up the day of. Pass its page url from search_events, or a link the user sent. Call it again with the same url to fill in the time or turn reminders on or off.",
     input_schema: {
       type: "object",
       properties: {
         url: { type: "string", description: "The event's page url from search_events, or a link the user sent" },
         title: { type: "string" },
+        starts_at: {
+          type: "string",
+          description:
+            "When it starts, in the venue's local time with its UTC offset, e.g. 2026-11-14T22:00:00-05:00. Just the date (2026-11-14) when the time isn't known yet",
+        },
+        venue: { type: "string", description: "Where it is, e.g. Tomorrowland Miami" },
+        remind: {
+          type: "boolean",
+          description: "true once they say yes to you texting them before it, false if they say no. Leave it out otherwise",
+        },
         note: { type: "string" },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "remove_save",
+    description:
+      "Drop an event they saved, and the texts Haps would send about it. Use when they say they're not going anymore or want it gone.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The saved event's title, as listed under their saves" },
+      },
+      required: ["title"],
       additionalProperties: false,
     },
   },
@@ -305,6 +333,8 @@ export type ToolSession = {
   tasteChanged: boolean;
   /** Recs searches returned this reply, by id, so the ones the reply names get logged as shown. */
   recsOffered: Map<string, ShownRec>;
+  /** The conversation this reply goes to, where reminders for a save get texted. */
+  spaceId: string;
 };
 
 /** Their taste vector for a search, rebuilt first if this reply changed what it's made from. */
@@ -439,6 +469,8 @@ export async function runTool(
       }
       session.pageText += `\n${[event.title, event.venue, event.address, event.price_note].filter(Boolean).join("\n")}`;
       const when = describeWhen(event.starts_at, event.ends_at);
+      // Every event someone sends becomes a rec draft, credited to them. Not awaited: it's not part of the reply.
+      if (!when.past) void saveSharedRec(profile, sent, event);
       if (when.past) {
         return {
           error: "past_event",
@@ -458,9 +490,7 @@ export async function runTool(
           price_note: event.price_note,
           age: event.age,
         },
-        hint: when.timeKnown
-          ? "Offer to save it with save_event, using the url they sent. Mention the age limit if there is one."
-          : "The page had no start time. Ask what time it starts, and offer to save it with save_event using the url they sent.",
+        hint: `In this same reply: tell them what it is, when, and where, call save_event (the url they sent, title, venue, starts_at ${event.starts_at}), and ask if they want you to remind them before it.${when.timeKnown ? " Mention the age limit if there is one." : " The page had no start time, so ask what time it starts too. When they say, save it again with the full time."}`,
       };
     }
     case "search_events": {
@@ -568,13 +598,60 @@ export async function runTool(
       ) {
         return { error: "url_not_from_user_or_search", hint: "Only save links the user sent or a search returned." };
       }
+      if (session.untrusted && hasLink(asString(input.venue) ?? "")) {
+        return { error: "link_in_title_or_note", hint: "Keep links out of the venue. Put the link in url." };
+      }
+      const startsAt = asString(input.starts_at);
+      const start = startsAt ? cleanStart(startsAt) : null;
+      if (startsAt && !start) {
+        return { error: "bad_starts_at", hint: "starts_at must look like 2026-11-14T22:00:00-05:00, or 2026-11-14 when the time isn't known." };
+      }
       const saved = await saveEvent({
         profileId: profile.id,
         url: asString(input.url),
         title: asString(input.title),
         note: asString(input.note),
+        startsAt: start,
+        venue: asString(input.venue),
+        remind: typeof input.remind === "boolean" ? input.remind : undefined,
       });
-      return { saved };
+      // A reminder that can't be scheduled shouldn't lose the save itself.
+      const reminders = await scheduleReminders(saved, { platform: PROVIDER, spaceId: session.spaceId, zone: zoneFor(profile.city) }).catch(
+        (err: unknown) => {
+          console.error(`[remind] scheduling failed save=${saved.id}: ${formatError(err)}`);
+          return null;
+        },
+      );
+      const texts = Object.keys(reminders ?? {});
+      // Errors only when a promised reminder can't happen, so a reply already written beside this call gets fixed.
+      if (saved.remind && !saved.event_date) {
+        return { error: "no_date", hint: "Haps can't remind them without a date. Ask what day it is, then save it again with starts_at." };
+      }
+      if (saved.remind && !texts.length) {
+        return { error: "too_soon", hint: "It's too soon for a reminder to be worth it. Tell them it's coming right up, without promising a text." };
+      }
+      return {
+        saved: { title: saved.title, event_date: saved.event_date, starts_at: saved.starts_at, venue: saved.venue },
+        texts_planned: texts,
+      };
+    }
+    case "remove_save": {
+      const title = asString(input.title)?.toLowerCase();
+      if (!title) return { error: "title is required" };
+      const saves = await listSaves(profile.id);
+      const matches = saves.filter((save) => {
+        const name = (save.title ?? save.url ?? "").toLowerCase();
+        return name && (name.includes(title) || title.includes(name));
+      });
+      if (matches.length !== 1) {
+        return {
+          error: matches.length ? "more_than_one" : "not_found",
+          hint: "Ask which one they mean.",
+          saves: saves.map((save) => save.title ?? save.url),
+        };
+      }
+      await removeSave(profile.id, matches[0]!.id);
+      return { removed: matches[0]!.title ?? matches[0]!.url };
     }
     case "list_saves": {
       const saves = await listSaves(profile.id);

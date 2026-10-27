@@ -3,12 +3,13 @@ import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { handleMessage } from "./handlers/message.ts";
+import { startReminders } from "./reminders/send.ts";
 import { startTracing } from "./observability.ts";
 import { loadEmbedder } from "./search/embed.ts";
 import { RECS_SEARCH_ON } from "./search/recs.ts";
+import { PROVIDER } from "./utils/provider.ts";
 import { formatError } from "./utils/text.ts";
 
-const PROVIDER = (process.env.SPECTRUM_PROVIDER ?? "imessage").toLowerCase();
 
 for (const key of [
   "ANTHROPIC_API_KEY",
@@ -35,6 +36,9 @@ const app = await Spectrum({
 });
 
 console.log(`Agent online. provider=${PROVIDER}`);
+
+// Texts Haps sends first (event reminders) go to the conversation the event was saved from.
+startReminders(PROVIDER, (id) => (PROVIDER === "terminal" ? terminal(app).space.get(id) : imessage(app).space.get(id)));
 
 // One queue per sender: their messages stay in order, but a slow reply never blocks anyone else.
 const queues = new Map<string, Promise<void>>();

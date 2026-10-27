@@ -60,5 +60,12 @@ export type SaveRow = {
   url: string | null;
   title: string | null;
   note: string | null;
+  /** When it starts, once the time is known. */
+  starts_at: string | null;
+  /** The day in the venue's time zone, known even when the start time isn't. */
+  event_date: string | null;
+  venue: string | null;
+  /** They said yes to Haps texting them before it. */
+  remind: boolean;
   created_at: string;
 };
