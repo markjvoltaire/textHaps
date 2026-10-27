@@ -69,7 +69,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         vibe: {
           type: "string",
           description:
-            "How they want the night to feel, from what they told you (this ask or saved), e.g. low-key with good music, packed and rowdy, upscale. Broad likes like parties or good music aren't a vibe",
+            "How they want the night to feel, from what they told you for this ask, e.g. low-key with good music, packed and rowdy, upscale. Saved taste doesn't count, and broad likes like parties or good music aren't a vibe",
         },
         budget: {
           type: "string",
