@@ -13,23 +13,32 @@ const MAX_PAGES = 13;
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 /**
- * A flyer someone sent has no link, and what Claude read off it could be wrong. Exa looks for the
- * event online (ticketing sites and the open web, since plenty of nights only live on Instagram),
- * and Jev checks each page is this exact event: same name, venue, and date. The page that passes
- * becomes the save's link and the event becomes a rec draft credited to them. Nothing passing
- * (or Jev being down) leaves the save as it is and keeps the event out of recs.
+ * The web page for an event from a flyer, or null. Exa looks for the event online (ticketing sites
+ * and the open web, since plenty of nights only live on Instagram), and Jev checks each page is this
+ * exact event: same name, venue, and date. Throws when a search or Jev fails.
+ */
+export async function findFlyerPage(profile: Profile, save: SaveRow): Promise<string | null> {
+  if (!save.title || !save.event_date) return null;
+  const day = `${MONTHS[+save.event_date.slice(5, 7) - 1]} ${+save.event_date.slice(8, 10)}`;
+  const about = [save.title, save.venue && `at ${save.venue}`, `on ${day}, ${save.event_date.slice(0, 4)}`].filter(Boolean).join(" ");
+  const query = [save.title, save.venue, profile.city, day].filter(Boolean).join(" ");
+  const [tickets, web] = await Promise.all([searchEventPages(query), searchWeb(query)]);
+  const seen = new Set<string>();
+  const pages = [...tickets, ...web].filter((page) => !seen.has(page.url) && seen.add(page.url)).slice(0, MAX_PAGES);
+  const url = await bestMatch(about, pages);
+  console.log(`[verify] ${JSON.stringify(save.title)} -> ${url ?? "not verified"} (${pages.length} pages)`);
+  return url;
+}
+
+/**
+ * A flyer someone sent has no link, and what Claude read off it could be wrong. The page that
+ * findFlyerPage verifies becomes the save's link and the event becomes a rec draft credited to them.
+ * Nothing passing (or Jev being down) leaves the save as it is and keeps the event out of recs.
  */
 export async function verifyFlyerEvent(profile: Profile, save: SaveRow): Promise<string | null> {
   if (save.url || !save.title || !save.event_date) return null;
-  const day = `${MONTHS[+save.event_date.slice(5, 7) - 1]} ${+save.event_date.slice(8, 10)}`;
-  const about = [save.title, save.venue && `at ${save.venue}`, `on ${day}, ${save.event_date.slice(0, 4)}`].filter(Boolean).join(" ");
   try {
-    const query = [save.title, save.venue, profile.city, day].filter(Boolean).join(" ");
-    const [tickets, web] = await Promise.all([searchEventPages(query), searchWeb(query)]);
-    const seen = new Set<string>();
-    const pages = [...tickets, ...web].filter((page) => !seen.has(page.url) && seen.add(page.url)).slice(0, MAX_PAGES);
-    const url = await bestMatch(about, pages);
-    console.log(`[verify] ${JSON.stringify(save.title)} -> ${url ?? "not verified"} (${pages.length} pages)`);
+    const url = await findFlyerPage(profile, save);
     if (!url) return null;
 
     // Only fills an empty link, so one they sent later isn't overwritten.
@@ -62,7 +71,7 @@ async function bestMatch(about: string, pages: WebResult[]): Promise<string | nu
         `p${i}`,
         {
           type: "noul" as const,
-          instructions: `Is this page about this exact event: ${about}? A page for a weekly or recurring night counts if it's the same night at the same venue and runs on that date. Score low for a one-off on a different date, a different venue, a different event with a similar name, or a page that only lists many events.\n\nURL: ${page.url}\nTitle: ${page.title}\nText: ${page.highlights.join(" ").slice(0, 400)}`,
+          instructions: `Is this page about this exact event: ${about}? A flyer and a listing often name the same night differently (a series name on one, the headliner or host on the other), so the name alone does not decide it. Count it when the venue and date match and the page names an act, host, or promoter from the flyer, or when it is a weekly or recurring night at that venue that runs on that date. Score low for a different date, a different venue, or a page that only lists many events.\n\nURL: ${page.url}\nTitle: ${page.title}\nText: ${page.highlights.join(" ").slice(0, 400)}`,
         },
       ]),
     ),

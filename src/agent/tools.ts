@@ -4,7 +4,7 @@ import { recordPick, type ShownRec } from "../db/picks.ts";
 import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
 import { scheduleReminders, zoneFor } from "../reminders/schedule.ts";
 import { saveSharedRec } from "../recs/shared.ts";
-import { verifyFlyerEvent } from "../recs/verify.ts";
+import { findFlyerPage, verifyFlyerEvent } from "../recs/verify.ts";
 import { RSVP_ON } from "../rsvp/run.ts";
 import { beginRsvp } from "../rsvp/start.ts";
 import { lovedBySimilar, recordFeedback, VERDICTS } from "../db/feedback.ts";
@@ -836,9 +836,19 @@ export async function runTool(
       if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
         return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
       }
-      const url = save.url ?? linkGiven;
+      // A flyer has no link: look for its page the same way a flyer save is verified, so the rsvp doesn't hang on Claude finding it.
+      const url =
+        save.url ??
+        linkGiven ??
+        (await findFlyerPage(profile, save).catch((err: unknown) => {
+          console.warn(`[rsvp] page search failed for save=${save.id}: ${formatError(err)}`);
+          return null;
+        }));
       if (!url) {
-        return { error: "no_link", hint: "This save has no event page. Find it with search_events or web_search, then call rsvp with its url." };
+        return {
+          error: "no_link",
+          hint: "Haps searched and couldn't find this event's page, so nothing is running. Tell them you couldn't find where to rsvp, and ask if they have the link.",
+        };
       }
       const started = await beginRsvp({ profile, save, url, platform: PROVIDER, spaceId: session.spaceId });
       if (!started) return { error: "already_running", hint: "Haps is already rsvping them for this. Tell them it's in progress." };
