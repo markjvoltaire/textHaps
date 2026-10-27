@@ -1,6 +1,11 @@
 import sharp from "sharp";
 
-export type ImageInput = { mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp"; data: string };
+export type ImageInput = {
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+  data: string;
+  /** What OCR read off the photo, shown to Claude next to it. */
+  ocr?: string;
+};
 
 /** The types Claude reads as-is. Anything else (like HEIC) is converted, or refused if sharp can't open it. */
 const CLAUDE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);

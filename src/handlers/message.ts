@@ -12,6 +12,7 @@ import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { prepareImage, type ImageInput } from "../utils/image.ts";
+import { readPhotoText } from "../utils/ocr.ts";
 import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
 
@@ -150,6 +151,13 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       console.warn(`[photo] failed for sender=${senderId}:`, formatError(err));
       await space.send(PHOTO_FALLBACK_REPLY);
       return;
+    }
+    // OCR is a second read for exact spellings and times. Claude still sees the photo, so a failed one just goes without.
+    try {
+      image.ocr = await readPhotoText(image);
+      console.log(`[ocr] sender=${senderId} chars=${image.ocr.length}`);
+    } catch (err) {
+      console.warn(`[ocr] failed for sender=${senderId}:`, formatError(err));
     }
     text = text || PHOTO_TURN;
   }
