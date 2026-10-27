@@ -11,12 +11,18 @@ import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
+import { prepareImage, type ImageInput } from "../utils/image.ts";
 import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
 
 const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
 const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me instead?";
+const PHOTO_FALLBACK_REPLY = "couldn't open that pic\ncan you screenshot it and send that?";
+/** What a photo is in the chat history. Claude sees the image itself only on the turn it arrives. */
+const PHOTO_TURN = "(sent a photo)";
+// Phone photos run 2-6 MB; anything far past that isn't a flyer.
+const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
 // A few minutes of voice note is well under this.
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 const AUDIO_READ_TIMEOUT_MS = 10_000;
@@ -48,6 +54,12 @@ function audioOf(content: Message["content"]): Audio | undefined {
   return undefined;
 }
 
+/** A photo or screenshot, like an event flyer. */
+function photoOf(content: Message["content"]): Audio | undefined {
+  if (content.type === "attachment" && content.mimeType.startsWith("image/")) return content;
+  return undefined;
+}
+
 /** Clears the Haps chat background from threads that got one earlier. A failure never blocks the reply. */
 async function clearBackground(space: Space, profile: Profile): Promise<void> {
   if (profile.platform !== "imessage" || !profile.background_set_at) return;
@@ -65,7 +77,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   if (message.direction === "outbound") return;
   if (message.content.type === "read") return;
   const audio = audioOf(message.content);
-  if (message.content.type !== "text" && !audio) {
+  const photo = photoOf(message.content);
+  if (message.content.type !== "text" && !audio && !photo) {
     console.log(`[skip] space=${space.id} unsupported content type=${message.content.type}`);
     return;
   }
@@ -86,7 +99,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   const senderId = message.sender?.id ?? space.id;
   const platform = message.platform || "imessage";
   let text = extractText(message.content).trim();
-  if (!text && !audio) return;
+  if (!text && !audio && !photo) return;
 
   // Before any voice work, so an over-limit sender can't run up the Deepgram bill.
   let profile: Profile;
@@ -126,7 +139,22 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
   }
 
-  console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}`);
+  let image: ImageInput | undefined;
+  if (photo) {
+    try {
+      const buf = await withTimeout(photo.read(), AUDIO_READ_TIMEOUT_MS, "photo download");
+      if (buf.length > MAX_PHOTO_BYTES) throw new Error(`photo too large: ${buf.length} bytes`);
+      image = (await prepareImage(buf, photo.mimeType)) ?? undefined;
+      if (!image) throw new Error(`can't open ${photo.mimeType}`);
+    } catch (err) {
+      console.warn(`[photo] failed for sender=${senderId}:`, formatError(err));
+      await space.send(PHOTO_FALLBACK_REPLY);
+      return;
+    }
+    text = text || PHOTO_TURN;
+  }
+
+  console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}${image ? ` photo=${photo!.mimeType}` : ""}`);
 
   // One Langfuse trace per reply: the text in, what was actually sent out, and the
   // Claude calls and tools in between (no-op when Langfuse keys aren't set).
@@ -153,7 +181,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         getHistory(profile.id),
       ]);
       const generated = await propagateAttributes({ userId: profile.id, sessionId: profile.id }, () =>
-        generateReply({ profile, taste, saves, history, userMessage: text, spaceId: space.id, onWebSearch }),
+        generateReply({ profile, taste, saves, history, userMessage: text, images: image ? [image] : undefined, spaceId: space.id, onWebSearch }),
       );
       // Typing must start before the answer lands, or the dots can linger after it.
       await searchingNotice;

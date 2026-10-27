@@ -28,7 +28,7 @@ test("days before crosses a month", () => {
   assert.equal(iso(localTime("2026-12-01", 18, NY, 2)), "2026-11-29T23:00:00.000Z");
 });
 
-test("MOVE, sat nov 14 10pm, saved oct 26: check-in thu 6pm, heads-up sat noon", () => {
+test("MOVE, sat nov 14 10pm, saved oct 26: check-in thu 6pm, heads-up sat noon, follow-up sun 1pm", () => {
   const times = reminderTimes(
     { starts_at: "2026-11-14T22:00:00-05:00", event_date: "2026-11-14" },
     NY,
@@ -36,6 +36,7 @@ test("MOVE, sat nov 14 10pm, saved oct 26: check-in thu 6pm, heads-up sat noon",
   );
   assert.equal(iso(times.check_in), "2026-11-12T23:00:00.000Z");
   assert.equal(iso(times.day_of), "2026-11-14T17:00:00.000Z");
+  assert.equal(iso(times.follow_up), "2026-11-15T18:00:00.000Z");
 });
 
 test("no start time yet still gets both, on the date alone", () => {
@@ -62,17 +63,22 @@ test("saved the night before: no check-in, heads-up still goes", () => {
   assert.equal(iso(times.day_of), "2026-11-14T17:00:00.000Z");
 });
 
-test("saved the day of: nothing to send", () => {
+test("saved the day of: only the follow-up", () => {
   const times = reminderTimes(
     { starts_at: "2026-11-14T22:00:00-05:00", event_date: "2026-11-14" },
     NY,
     Date.parse("2026-11-14T15:00:00Z"),
   );
-  assert.deepEqual(times, {});
+  assert.deepEqual(Object.keys(times), ["follow_up"]);
 });
 
 test("no date: nothing to send", () => {
   assert.deepEqual(reminderTimes({ starts_at: null, event_date: null }, NY), {});
+});
+
+test("follow-up the day after crosses a month", () => {
+  const times = reminderTimes({ starts_at: null, event_date: "2026-11-30" }, NY, Date.parse("2026-10-27T01:00:00Z"));
+  assert.equal(iso(times.follow_up), "2026-12-01T18:00:00.000Z");
 });
 
 test("zone: LA neighborhoods are Pacific, everything else Eastern", () => {

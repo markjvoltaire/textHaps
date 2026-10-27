@@ -1,6 +1,7 @@
 import type { Space } from "spectrum-ts";
 import { getSupabase } from "../db/client.ts";
 import type { Profile, SaveRow } from "../db/types.ts";
+import { hasFeedback } from "../db/feedback.ts";
 import { appendAssistantTurn, getHistory } from "../memory/history.ts";
 import { formatError } from "../utils/text.ts";
 import { zoneFor, type ReminderKind } from "./schedule.ts";
@@ -67,7 +68,12 @@ async function sendDue(platform: string, spaceFor: (id: string) => Promise<Space
 
     const { profiles: profile, saves: save } = reminder;
     const late = now - Date.parse(reminder.send_at);
-    const over = save.starts_at ? Date.parse(save.starts_at) < now : false;
+    // The follow-up is meant for after it, so only the reminders before it go stale when it starts.
+    const over = reminder.kind !== "follow_up" && save.starts_at ? Date.parse(save.starts_at) < now : false;
+    if (reminder.kind === "follow_up" && (await hasFeedback(save.id))) {
+      console.log(`[remind] skip id=${reminder.id} kind=follow_up, they already said how it went`);
+      continue;
+    }
     if (late > STALE_MS || over) {
       console.log(`[remind] skip id=${reminder.id} kind=${reminder.kind}, ${over ? "event started" : `${Math.round(late / 60_000)}m late`}`);
       continue;

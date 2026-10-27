@@ -25,10 +25,13 @@ export type SaveInput = {
   remind?: boolean;
 };
 
-/** Saves an event, or updates the save with that url, so the start time or a yes to reminders can come later. */
+/**
+ * Saves an event, or updates the save for the same event, so the start time or a yes to reminders
+ * can come later. The same event is the same url, or for a flyer with no link, the same title.
+ */
 export async function saveEvent(input: SaveInput): Promise<SaveRow> {
-  if (!input.url) {
-    throw new Error("save_event needs a url");
+  if (!input.url && !input.title) {
+    throw new Error("save_event needs a url or a title");
   }
   const fields: Record<string, string | boolean | null> = {};
   if (input.remind !== undefined) fields.remind = input.remind;
@@ -41,11 +44,8 @@ export async function saveEvent(input: SaveInput): Promise<SaveRow> {
     fields.starts_at = input.startsAt.length > 10 ? input.startsAt : null;
   }
 
-  const { data: existing, error: findError } = await getSupabase()
-    .from("saves")
-    .select("id")
-    .eq("profile_id", input.profileId)
-    .eq("url", input.url)
+  const match = getSupabase().from("saves").select("id").eq("profile_id", input.profileId);
+  const { data: existing, error: findError } = await (input.url ? match.eq("url", input.url) : match.is("url", null).ilike("title", input.title!.replace(/[%_\\]/g, "\\$&")))
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -56,7 +56,7 @@ export async function saveEvent(input: SaveInput): Promise<SaveRow> {
     ? Object.keys(fields).length
       ? getSupabase().from("saves").update(fields).eq("id", existing.id)
       : getSupabase().from("saves").select("*").eq("id", existing.id)
-    : getSupabase().from("saves").insert({ profile_id: input.profileId, url: input.url, ...fields });
+    : getSupabase().from("saves").insert({ profile_id: input.profileId, url: input.url ?? null, ...fields });
   const { data, error } = await query.select("*").single();
 
   if (error) throw error;

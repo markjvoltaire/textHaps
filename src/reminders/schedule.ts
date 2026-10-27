@@ -2,7 +2,7 @@ import { getSupabase } from "../db/client.ts";
 import type { SaveRow } from "../db/types.ts";
 import { metroFor } from "../utils/metro.ts";
 
-export type ReminderKind = "check_in" | "day_of";
+export type ReminderKind = "check_in" | "day_of" | "follow_up";
 
 const HOUR = 3600_000;
 /** A reminder this close to now isn't worth a text: they just talked about it. */
@@ -42,7 +42,8 @@ export function localTime(date: string, hour: number, zone: string, daysBefore =
 
 /**
  * When to text about a saved event. A check-in 2 days out at 6pm ("still thinking about it?"),
- * and a heads-up the day of: noon, or 7pm the night before for something that starts before 2pm.
+ * a heads-up the day of (noon, or 7pm the night before for something that starts before 2pm),
+ * and a follow-up at 1pm the day after ("did you go? how was it?").
  * Anything already past, or too soon after saving, is left out.
  */
 export function reminderTimes(
@@ -57,6 +58,7 @@ export function reminderTimes(
   const times: Partial<Record<ReminderKind, number>> = {
     check_in: localTime(save.event_date, 18, zone, 2),
     day_of: early ? localTime(save.event_date, 19, zone, 1) : noon,
+    follow_up: localTime(save.event_date, 13, zone, -1),
   };
   for (const kind of Object.keys(times) as ReminderKind[]) {
     if (times[kind]! < now + MIN_LEAD_MS) delete times[kind];

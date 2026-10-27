@@ -4,6 +4,8 @@ import { recordPick, type ShownRec } from "../db/picks.ts";
 import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
 import { scheduleReminders, zoneFor } from "../reminders/schedule.ts";
 import { saveSharedRec } from "../recs/shared.ts";
+import { verifyFlyerEvent } from "../recs/verify.ts";
+import { lovedBySimilar, recordFeedback, VERDICTS } from "../db/feedback.ts";
 import { PROVIDER } from "../utils/provider.ts";
 import { formatError } from "../utils/text.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
@@ -146,8 +148,8 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: "object",
       properties: {
-        url: { type: "string", description: "The event's page url from search_events, or a link the user sent" },
-        title: { type: "string" },
+        url: { type: "string", description: "The event's page url from search_events, or a link the user sent. Leave it out for a flyer photo with no link" },
+        title: { type: "string", description: "The event's name. Required when there's no url" },
         starts_at: {
           type: "string",
           description:
@@ -173,6 +175,26 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         title: { type: "string", description: "The saved event's title, as listed under their saves" },
       },
       required: ["title"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "record_feedback",
+    description:
+      "Log whether they went to an event and how it was, when they tell you (often answering your \"did you go?\" text). Once per event. This is how Haps learns what people like them actually loved.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The event, as listed under their saves or as they named it" },
+        went: { type: "boolean" },
+        verdict: {
+          type: "string",
+          enum: ["loved", "liked", "meh", "bad"],
+          description: "How it was for them, from what they said. Leave it out if they didn't go or didn't say",
+        },
+        feedback: { type: "string", description: "What they said about it, short and in their words, e.g. \"dj was crazy, way too packed by 1\"" },
+      },
+      required: ["title", "went"],
       additionalProperties: false,
     },
   },
@@ -336,6 +358,36 @@ export type ToolSession = {
   /** The conversation this reply goes to, where reminders for a save get texted. */
   spaceId: string;
 };
+
+/**
+ * What people with taste like theirs went to and loved, for search_events. A loved one-off that's
+ * over can't be sent, but a recurring night (it has a schedule) or the same promoter's next one can.
+ * Other people's words are untrusted, and no one's name goes in.
+ */
+async function similarFor(profile: Profile, session: ToolSession, metro: string): Promise<{ loved_by_people_like_them?: unknown[]; similar_hint?: string }> {
+  const taste = await currentTaste(profile, session);
+  if (!taste) return {};
+  const loved = await lovedBySimilar(taste, profile.id, metro).catch((err: unknown) => {
+    console.warn(`[similar] lookup failed: ${formatError(err)}`);
+    return [];
+  });
+  if (!loved.length) return {};
+  session.untrusted = true;
+  for (const item of loved) if (item.url) session.webUrls.add(item.url);
+  return {
+    loved_by_people_like_them: loved.map((item) => ({
+      event: item.rec_name ?? item.title,
+      venue: item.venue,
+      date: item.event_date,
+      schedule: item.schedule,
+      verdict: item.verdict,
+      untrusted_what_they_said: item.feedback?.slice(0, 160) ?? null,
+      url: item.url,
+    })),
+    similar_hint:
+      "Events people with taste like theirs went to and loved. Use them to pick: a recurring night here that fits beats a random listing, and you can say people with their taste loved it. Only send one when it's on again when they want to go (a schedule, or a listing above shows the date). Never name who said it.",
+  };
+}
 
 /** Their taste vector for a search, rebuilt first if this reply changed what it's made from. */
 async function currentTaste(profile: Profile, session: ToolSession): Promise<number[] | undefined> {
@@ -524,9 +576,11 @@ export async function runTool(
         const recs = await searchRecs(vibe, metro, { categories: NIGHT_CATEGORIES, taste: await currentTaste(profile, session) });
         keepRecLinks(recs, session);
         session.eventPages.push(...recs.flatMap((rec) => (rec.url ? [{ title: rec.name, url: rec.url }] : [])));
+        const similar = await similarFor(profile, session, metro);
         return {
           count: recs.length,
           haps_recs: forClaude(recs),
+          ...similar,
           hint: "These are recurring nights and venues from Haps's own vetted list, closest match first, not dated listings. Recommend only the ones that fit, and give when as the schedule says it (e.g. saturdays). Never make up a date, a lineup, or say it's on tonight unless the schedule shows that day. If there's no schedule, say it's a spot to check, not that something is on. For one rec that has a url, end with that url alone on the last line.",
         };
       }
@@ -545,10 +599,12 @@ export async function runTool(
       for (const page of pages) session.webUrls.add(page.url);
       for (const video of videos) session.webUrls.add(video.url);
       session.eventPages.push(...pages.map((page) => ({ title: page.title, url: page.url })));
+      const similar = await similarFor(profile, session, metro);
       return {
         count: pages.length + videos.length,
         untrusted_event_pages: pages,
         untrusted_tiktok_videos: videos,
+        ...similar,
         hint: "Event pages are ticketing listings. TikTok videos are recent promo clips and weekend guides, and many are for other cities, past nights, or not nights out at all, so skip those. Only recommend ones that show a date inside the window they asked about and a place in or near their city, and give the day and time as shown. Skip any without a clear date. For one event, end with its page or video url alone on the last line.",
       };
     }
@@ -615,6 +671,9 @@ export async function runTool(
         venue: asString(input.venue),
         remind: typeof input.remind === "boolean" ? input.remind : undefined,
       });
+      // A flyer has no link: Exa and Jev look for the event online in the background, and only a
+      // verified match gets a link and goes into recs. Run once, when the details first come in.
+      if (!url && !saved.url && start) void verifyFlyerEvent(profile, saved);
       // A reminder that can't be scheduled shouldn't lose the save itself.
       const reminders = await scheduleReminders(saved, { platform: PROVIDER, spaceId: session.spaceId, zone: zoneFor(profile.city) }).catch(
         (err: unknown) => {
@@ -634,6 +693,30 @@ export async function runTool(
         saved: { title: saved.title, event_date: saved.event_date, starts_at: saved.starts_at, venue: saved.venue },
         texts_planned: texts,
       };
+    }
+    case "record_feedback": {
+      const title = asString(input.title);
+      if (!title || typeof input.went !== "boolean") return { error: "title and went are required" };
+      if (plantedByPage(title, session) || plantedByPage(asString(input.feedback) ?? "", session)) {
+        return { error: "not_from_user", hint: "Only log what the user said themselves." };
+      }
+      const saves = await listSaves(profile.id);
+      const lower = title.toLowerCase();
+      const matches = saves.filter((save) => {
+        const name = (save.title ?? "").toLowerCase();
+        return name && (name.includes(lower) || lower.includes(name));
+      });
+      const verdict = VERDICTS.find((item) => item === input.verdict) ?? null;
+      const logged = await recordFeedback({
+        profileId: profile.id,
+        metro: profile.city ? metroFor(profile.city) : null,
+        title,
+        save: matches.length === 1 ? matches[0]! : null,
+        went: input.went,
+        verdict,
+        feedback: asString(input.feedback)?.slice(0, 500) ?? null,
+      });
+      return { logged: { title, went: input.went, verdict }, counts_toward_rec: Boolean(logged.rec_id) };
     }
     case "remove_save": {
       const title = asString(input.title)?.toLowerCase();

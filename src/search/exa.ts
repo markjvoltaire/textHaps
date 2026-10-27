@@ -18,7 +18,7 @@ export async function searchWeb(query: string): Promise<WebResult[]> {
 }
 
 // Where nights get listed. Exa can't read Posh pages well, but their titles and dates still show up.
-const EVENT_DOMAINS = ["dice.fm", "posh.vip", "partiful.com", "eventbrite.com", "ra.co", "shotgun.live", "lu.ma"];
+export const EVENT_DOMAINS = ["dice.fm", "posh.vip", "partiful.com", "eventbrite.com", "ra.co", "shotgun.live", "lu.ma"];
 
 /** Live event pages from ticketing sites, for search_events. `since` drops pages published before it (old nights). */
 export async function searchEventPages(query: string, since?: Date): Promise<WebResult[]> {
