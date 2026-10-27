@@ -14,7 +14,7 @@ import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { prepareImage, type ImageInput } from "../utils/image.ts";
 import { readPhotoText } from "../utils/ocr.ts";
-import { extractText, formatError, sanitizeOutgoingText } from "../utils/text.ts";
+import { formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
 
 const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
@@ -76,6 +76,19 @@ function audioOf(content: Message["content"]): Audio | undefined {
   return undefined;
 }
 
+/** The pieces of a message: a group (a photo sent with text, a link with a note) is several, anything else is one. */
+function partsOf(content: Message["content"]): Message["content"][] {
+  return content.type === "group" ? content.items.map((item) => item.content) : [content];
+}
+
+/** What they wrote, from every text piece and link preview in the message. */
+function textOf(parts: Message["content"][]): string {
+  return parts
+    .map((part) => (part.type === "text" ? part.text : part.type === "markdown" ? part.markdown : part.type === "richlink" ? part.url : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
 /** A photo or screenshot, like an event flyer. */
 function photoOf(content: Message["content"]): Audio | undefined {
   if (content.type === "attachment" && content.mimeType.startsWith("image/")) return content;
@@ -98,9 +111,12 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
   const receivedAt = Date.now();
   if (message.direction === "outbound") return;
   if (message.content.type === "read") return;
-  const audio = audioOf(message.content);
-  const photo = photoOf(message.content);
-  if (message.content.type !== "text" && !audio && !photo) {
+  const parts = partsOf(message.content);
+  // One of each: the first voice note and the first photo. A second photo in the same send is dropped.
+  const audio = parts.map(audioOf).find(Boolean);
+  const photo = parts.map(photoOf).find(Boolean);
+  const written = textOf(parts);
+  if (!written && !audio && !photo) {
     console.log(`[skip] space=${space.id} unsupported content type=${message.content.type}`);
     return;
   }
@@ -120,7 +136,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
   const senderId = message.sender?.id ?? space.id;
   const platform = message.platform || "imessage";
-  let text = extractText(message.content).trim();
+  let text = written.trim();
   if (!text && !audio && !photo) return;
 
   // Before any voice work, so an over-limit sender can't run up the Deepgram bill.
