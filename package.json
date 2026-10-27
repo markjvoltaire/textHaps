@@ -13,10 +13,11 @@
     "signals": "tsx src/signals/run.ts",
     "vectors": "tsx src/search/vectors.ts",
     "recs": "tsx src/recs/draft.ts",
-    "warm-model": "tsx src/search/warmModel.ts"
+    "warm-model": "tsx src/search/warmModel.ts",
+    "rsvp": "tsx src/rsvp/try.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.120.0",
+    "@anthropic-ai/sdk": "^0.137.0",
     "@huggingface/transformers": "^3.7.6",
     "@langfuse/otel": "^6.0.1",
     "@langfuse/tracing": "^6.0.1",
@@ -26,6 +27,7 @@
     "ffmpeg-static": "^5.2.0",
     "sharp": "^0.34.5",
     "spectrum-ts": "^12.8.0",
+    "stagehand-claude-sdk": "^0.1.0",
     "tsx": "^4.23.15"
   },
   "devDependencies": {

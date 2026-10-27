@@ -4,9 +4,10 @@ import type { SaveRow } from "./types.ts";
 export async function listSaves(profileId: string): Promise<SaveRow[]> {
   const { data, error } = await getSupabase()
     .from("saves")
-    .select("*")
+    .select("*, rsvps(status, created_at)")
     .eq("profile_id", profileId)
     .order("created_at", { ascending: false })
+    .order("created_at", { referencedTable: "rsvps", ascending: false })
     .limit(20);
 
   if (error) throw error;
@@ -82,5 +83,7 @@ const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "
 export function formatSave(save: SaveRow): string {
   const name = save.title ?? save.url ?? "saved item";
   const date = save.event_date ? `${MONTHS[+save.event_date.slice(5, 7) - 1]} ${+save.event_date.slice(8, 10)}` : null;
-  return [name, date, save.venue].filter(Boolean).join(", ");
+  const rsvp = save.rsvps?.[0]?.status;
+  const rsvped = rsvp === "done" ? "rsvped" : rsvp === "running" || rsvp === "needs_input" ? "rsvp in progress" : null;
+  return [name, date, save.venue, rsvped].filter(Boolean).join(", ");
 }

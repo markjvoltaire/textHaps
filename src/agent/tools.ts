@@ -5,6 +5,8 @@ import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
 import { scheduleReminders, zoneFor } from "../reminders/schedule.ts";
 import { saveSharedRec } from "../recs/shared.ts";
 import { verifyFlyerEvent } from "../recs/verify.ts";
+import { RSVP_ON } from "../rsvp/run.ts";
+import { beginRsvp } from "../rsvp/start.ts";
 import { lovedBySimilar, recordFeedback, VERDICTS } from "../db/feedback.ts";
 import { PROVIDER } from "../utils/provider.ts";
 import { formatError } from "../utils/text.ts";
@@ -263,6 +265,23 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "rsvp",
+    description:
+      "RSVP them to a free event on its site: Haps opens the page in a browser and fills the form with their name and email, then texts them how it went. Only after your last message asked to rsvp them with their full name, email, and the event's name, and they said yes. The event has to be saved first. It runs in the background, so reply that you're on it.",
+    input_schema: {
+      type: "object",
+      required: ["title"],
+      properties: {
+        title: { type: "string", description: "The saved event's title, as listed under their saves" },
+        url: {
+          type: "string",
+          description: "The event's page, when the save has none (a flyer): a link from search_events or web_search, or one they sent",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
@@ -357,6 +376,8 @@ export type ToolSession = {
   recsOffered: Map<string, ShownRec>;
   /** The conversation this reply goes to, where reminders for a save get texted. */
   spaceId: string;
+  /** Haps's last message before this one, where an rsvp has to have been asked for and confirmed. */
+  lastReply: string;
 };
 
 /**
@@ -781,6 +802,47 @@ export async function runTool(
       }
       const logged = await recordPick({ profileId: profile.id, name: pickName, outcome, note: asString(input.note) });
       return { logged: { name: logged.name, outcome } };
+    }
+    case "rsvp": {
+      if (!RSVP_ON) return { error: "rsvp_off", hint: "Haps can't rsvp right now. Send them the event's link so they can do it in a tap." };
+      const title = asString(input.title)?.toLowerCase();
+      if (!title) return { error: "title is required" };
+      if (!profile.full_name || !profile.email) {
+        return { error: "missing_details", hint: "Haps needs their first and last name and their email to rsvp. Ask for whichever is missing." };
+      }
+      const saves = await listSaves(profile.id);
+      const matches = saves.filter((save) => {
+        const saved = (save.title ?? save.url ?? "").toLowerCase();
+        return saved && (saved.includes(title) || title.includes(saved));
+      });
+      if (matches.length !== 1) {
+        return {
+          error: matches.length ? "more_than_one" : "not_saved",
+          hint: matches.length ? "Ask which one they mean." : "Save the event with save_event first, then rsvp.",
+          saves: saves.map((save) => save.title ?? save.url),
+        };
+      }
+      const save = matches[0]!;
+      // They have to have seen exactly who Haps would sign up, and for what, right before saying yes.
+      const asked = session.lastReply.toLowerCase();
+      const named = (save.title ?? "").toLowerCase().split(/\s+/).filter((word) => word.length >= 3);
+      if (!asked.includes(profile.email) || (named.length && !named.some((word) => asked.includes(word)))) {
+        return {
+          error: "not_confirmed",
+          hint: `Ask first, in one line: rsvp you as ${profile.full_name}, ${profile.email}, for ${save.title ?? "it"}? Call rsvp once they say yes.`,
+        };
+      }
+      const linkGiven = asString(input.url);
+      if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
+        return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
+      }
+      const url = save.url ?? linkGiven;
+      if (!url) {
+        return { error: "no_link", hint: "This save has no event page. Find it with search_events or web_search, then call rsvp with its url." };
+      }
+      const started = await beginRsvp({ profile, save, url, platform: PROVIDER, spaceId: session.spaceId });
+      if (!started) return { error: "already_running", hint: "Haps is already rsvping them for this. Tell them it's in progress." };
+      return { started: true, event: save.title, as: { name: profile.full_name, email: profile.email } };
     }
     default:
       return { error: `unknown tool ${name}` };

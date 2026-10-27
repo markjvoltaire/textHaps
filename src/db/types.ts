@@ -68,4 +68,6 @@ export type SaveRow = {
   /** They said yes to Haps texting them before it. */
   remind: boolean;
   created_at: string;
+  /** Haps's RSVP runs for it, newest first, when the query asked for them. */
+  rsvps?: { status: string; created_at: string }[];
 };
