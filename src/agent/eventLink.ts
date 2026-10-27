@@ -157,7 +157,8 @@ export async function extractEvent(pageTitle: string, pageText: string, url = ""
     { asType: "generation" },
   );
   try {
-    // A page read is a quick lookup: one try, then Haps asks the user instead.
+    // A page read is a quick lookup: one try, then Haps asks the user instead. Usually 2-5s, but a
+    // fresh worker's first call has run past 8s, so it gets room before giving up.
     const response = await anthropic.messages.create(
       {
         model: MODEL,
@@ -166,7 +167,7 @@ export async function extractEvent(pageTitle: string, pageText: string, url = ""
         messages: [{ role: "user", content: input }],
         output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
       },
-      { timeout: 8000, maxRetries: 0 },
+      { timeout: 15_000, maxRetries: 0 },
     );
     generation
       .update({
