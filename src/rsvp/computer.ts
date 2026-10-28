@@ -68,6 +68,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 export class Computer {
   private cursor: [number, number] = [0, 0];
+  private shots = 0;
   private constructor(
     private readonly browser: Browser,
     private readonly context: BrowserContext,
@@ -86,7 +87,10 @@ export class Computer {
     const bb = new Browserbase({ apiKey: input.apiKey });
     const session = await bb.sessions.create({
       ...(input.projectId ? { projectId: input.projectId } : {}),
-      browserSettings: { viewport: SCREEN },
+      browserSettings: { viewport: SCREEN, solveCaptchas: true },
+      // Residential IPs, so checkouts with fraud checks (DICE) don't refuse a datacenter browser.
+      // Billed per GB on Browserbase plans that include proxies, so it's switched on in the env.
+      ...(process.env.BROWSERBASE_PROXIES === "true" ? { proxies: true } : {}),
     });
     const browser = await chromium.connectOverCDP(session.connectUrl);
     const context = browser.contexts()[0] ?? (await browser.newContext({ viewport: SCREEN }));
@@ -95,6 +99,7 @@ export class Computer {
     await context.route("**/*", (route) => {
       const request = route.request();
       if (request.isNavigationRequest() && request.frame() === request.frame().page().mainFrame() && !input.allowed(request.url())) {
+        console.warn(`[rsvp] blocked a page load off the allowed sites: ${new URL(request.url()).hostname}`);
         return route.abort("blockedbyclient");
       }
       return route.continue();
@@ -116,6 +121,11 @@ export class Computer {
 
   async screenshot(): Promise<string> {
     const png = await this.page.screenshot({ type: "png", scale: "css", timeout: 10_000 });
+    // Dry runs only (npm run rsvp): keep what the agent saw, to debug a site it gave up on.
+    if (process.env.RSVP_SCREENSHOT_DIR) {
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(`${process.env.RSVP_SCREENSHOT_DIR}/${String(++this.shots).padStart(2, "0")}.png`, png).catch(() => {});
+    }
     return png.toString("base64");
   }
 

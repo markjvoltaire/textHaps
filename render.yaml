@@ -31,3 +31,5 @@ services:
       # A hosted browser for each rsvp Haps fills in. Without it, Haps sends the link instead.
       - key: BROWSERBASE_API_KEY
         sync: false
+      - key: BROWSERBASE_PROXIES
+        sync: false

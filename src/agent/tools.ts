@@ -19,7 +19,7 @@ import { NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../se
 import { refreshTasteEmbedding, tasteVector } from "../search/taste.ts";
 import { knownMetro, metroFor } from "../utils/metro.ts";
 import { cleanStart, describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
-import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
+import { cleanLinks, hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
@@ -811,14 +811,16 @@ export async function runTool(
       if (!profile.full_name || !profile.email) {
         return { error: "missing_details", hint: "Haps needs their first and last name and their email to rsvp. Ask for whichever is missing." };
       }
-      const linkGiven = asString(input.url);
-      if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
+      // Compared with tracking parameters cut on both sides, so the long share link and the clean one are the same event.
+      const sent = asString(input.url);
+      const linkGiven = sent ? cleanLinks(sent) : undefined;
+      if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])].map(cleanLinks))) {
         return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
       }
       const saves = await listSaves(profile.id);
       // The save for the link they sent is the one, even when other saves share its name (an
       // Instagram post and the DICE page for the same night).
-      const linked = linkGiven ? saves.filter((save) => save.url && isExactLink(save.url, [linkGiven])) : [];
+      const linked = linkGiven ? saves.filter((save) => save.url && isExactLink(cleanLinks(save.url), [linkGiven])) : [];
       const matches = linked.length
         ? linked.slice(0, 1)
         : saves.filter((save) => {
