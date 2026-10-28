@@ -22,7 +22,8 @@ import { formatError } from "../utils/text.ts";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const MODEL = process.env.ANTHROPIC_RSVP_MODEL ?? "claude-sonnet-5-5";
+// Opus: the hardest part of an rsvp is a real site's UI, where the stronger model misclicks less.
+const MODEL = process.env.ANTHROPIC_RSVP_MODEL ?? "claude-opus-5-5";
 // A free RSVP is a page or two and a form. Past this it's lost, and they should finish it themselves.
 const MAX_STEPS = 40;
 const MAX_MS = 8 * 60_000;
@@ -38,7 +39,7 @@ export const RSVP_ON = Boolean(process.env.BROWSERBASE_API_KEY);
 
 const SYSTEM = `You RSVP one person to one free event on its website, in a browser. You act for them with their consent: they asked for this RSVP and confirmed their name and email.
 
-- Start by navigating to the event page you're given. Find its RSVP, register, or get tickets button, pick the free option, and fill the form with their details. Use read_page or find to locate fields, and form_input to fill them.
+- Start by navigating to the event page you're given. Find its RSVP, register, or get tickets button, pick the free option, and fill the form with their details. Take a screenshot to see the page whenever its layout matters or something didn't work: a modal, a widget with no labels, a button that didn't respond. read_page, find, and form_input are faster for plain forms.
 - Fill only what the form needs from their details: name, email, and phone when the form asks for one. Leave optional fields empty. Don't make up answers.
 - When a required field needs something their details don't have (a phone, an address, a birthday, an instagram handle, a question the host asks), call ask_user with what it is, then fill in their answer. When the site texts or emails them a login or verification code, call ask_user with asking code. Ask one thing at a time, only for required fields, and never for card, bank, password, or ID numbers.
 - Never pay. Never enter card or bank details, even for a $0 total that asks for a card. Never buy anything, add paid items, or pick a paid tier.
@@ -241,6 +242,11 @@ export async function runRsvp(job: RsvpJob, deps: RsvpDeps): Promise<Outcome> {
     let steps = 0;
     for await (const message of runner) {
       steps += 1;
+      // Which browser actions it took, by name only: inputs can hold their details or a code.
+      const actions = message.content.flatMap((block) =>
+        block.type === "tool_use" ? [`${block.name}${typeof (block.input as { action?: unknown })?.action === "string" ? `.${(block.input as { action: string }).action}` : ""}`] : [],
+      );
+      if (actions.length) console.log(`[rsvp] id=${rsvp.id} step=${steps} ${actions.join(" ")}`);
       await store.heartbeat(rsvp.id);
       if (result.outcome) break;
       if (message.stop_reason === "refusal") result.outcome = "blocked";
