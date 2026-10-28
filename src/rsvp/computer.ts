@@ -59,6 +59,40 @@ function point(value: unknown): [number, number] | null {
   return [Math.max(0, Math.min(SCREEN.width - 1, x!)), Math.max(0, Math.min(SCREEN.height - 1, y!))];
 }
 
+/**
+ * A native <select> opens its options in a popup Chrome draws outside the page, so screenshots never show
+ * it (Eventbrite's ticket quantity). This opens a clicked select as an in-page list instead, the options
+ * visible and clickable, and folds it back once one is picked or focus leaves.
+ */
+const INLINE_SELECTS = `(() => {
+  const close = (select) => {
+    if (!select.dataset.hapsOpen) return;
+    select.size = Number(select.dataset.hapsSize || 0);
+    select.style.position = select.dataset.hapsPosition || "";
+    select.style.zIndex = select.dataset.hapsZ || "";
+    delete select.dataset.hapsOpen;
+  };
+  document.addEventListener("mousedown", (event) => {
+    const select = event.target instanceof Element ? event.target.closest("select") : null;
+    if (!select || select.multiple || select.dataset.hapsOpen || select.disabled) return;
+    event.preventDefault();
+    select.dataset.hapsOpen = "1";
+    select.dataset.hapsSize = String(select.size || 0);
+    select.dataset.hapsPosition = select.style.position;
+    select.dataset.hapsZ = select.style.zIndex;
+    select.size = Math.min(Math.max(select.options.length, 2), 10);
+    select.style.position = "relative";
+    select.style.zIndex = "2147483647";
+    select.focus();
+  }, true);
+  document.addEventListener("change", (event) => {
+    if (event.target instanceof HTMLSelectElement) close(event.target);
+  }, true);
+  document.addEventListener("focusout", (event) => {
+    if (event.target instanceof HTMLSelectElement) close(event.target);
+  }, true);
+})();`;
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -85,12 +119,20 @@ export class Computer {
 
   static async open(input: { apiKey: string; projectId?: string; allowed: (url: string) => boolean }): Promise<Computer> {
     const bb = new Browserbase({ apiKey: input.apiKey });
-    const session = await bb.sessions.create({
-      ...(input.projectId ? { projectId: input.projectId } : {}),
-      browserSettings: { viewport: SCREEN, solveCaptchas: true },
-      // Residential IPs, so checkouts with fraud checks (DICE) don't refuse a datacenter browser.
-      // Billed per GB on Browserbase plans that include proxies, so it's switched on in the env.
-      ...(process.env.BROWSERBASE_PROXIES === "true" ? { proxies: true } : {}),
+    const create = (proxies: boolean) =>
+      bb.sessions.create({
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        browserSettings: { viewport: SCREEN, solveCaptchas: true },
+        // Residential IPs, so checkouts with fraud checks (DICE) don't refuse a datacenter browser.
+        // Billed per GB on Browserbase plans that include proxies, so it's switched on in the env.
+        ...(proxies ? { proxies: true } : {}),
+      });
+    const wantProxies = process.env.BROWSERBASE_PROXIES === "true";
+    // A plan without proxies refuses the session (402). Run without them rather than not at all.
+    const session = await create(wantProxies).catch((err: unknown) => {
+      if (!wantProxies || (err as { status?: number }).status !== 402) throw err;
+      console.warn("[rsvp] browserbase plan has no proxies, running without them");
+      return create(false);
     });
     const browser = await chromium.connectOverCDP(session.connectUrl);
     const context = browser.contexts()[0] ?? (await browser.newContext({ viewport: SCREEN }));
@@ -104,6 +146,7 @@ export class Computer {
       }
       return route.continue();
     });
+    await context.addInitScript(INLINE_SELECTS);
     const page = context.pages()[0] ?? (await context.newPage());
     await page.setViewportSize(SCREEN);
     return new Computer(browser, context, page);

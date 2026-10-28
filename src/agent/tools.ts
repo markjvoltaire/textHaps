@@ -287,6 +287,17 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 
+/** Sites that block an automated rsvp, so Haps sends the link instead of starting one. */
+const BY_HAND = ["dice.fm"];
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
 type ToolInput = Record<string, unknown>;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -862,6 +873,15 @@ export async function runTool(
         return {
           error: "no_link",
           hint: "Haps searched and couldn't find this event's page, so nothing is running. Tell them you couldn't find where to rsvp, and ask if they have the link.",
+        };
+      }
+      // DICE refuses automated checkouts even through a residential IP (tested 2026-10-28), so a run
+      // there only burns minutes before handing back. Send the link now instead.
+      if (BY_HAND.some((domain) => (hostOf(url) ?? "").endsWith(domain))) {
+        return {
+          error: "rsvp_by_hand",
+          hint: "This site doesn't let Haps rsvp for them, and nothing is running. Send them the link so they can grab it in a tap.",
+          url,
         };
       }
       const started = await beginRsvp({ profile, save, url, platform: PROVIDER, spaceId: session.spaceId });
