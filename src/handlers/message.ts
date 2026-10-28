@@ -13,6 +13,7 @@ import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { prepareImage, type ImageInput } from "../utils/image.ts";
+import { cleanLinks } from "../agent/links.ts";
 import { readPhotoText } from "../utils/ocr.ts";
 import { formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
@@ -137,7 +138,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
 
   const senderId = message.sender?.id ?? space.id;
   const platform = message.platform || "imessage";
-  let text = written.trim();
+  let text = cleanLinks(written.trim());
   if (!text && !audio && !photo) return;
 
   // Before any voice work, so an over-limit sender can't run up the Deepgram bill.
@@ -275,8 +276,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     await backgroundCleared;
     if (!reply) {
       console.warn(`[claude] empty reply for sender=${senderId}`);
-      // They watched the typing dots through a search, so don't leave them hanging.
-      if (searchingNotice) await space.send(FALLBACK_REPLY);
+      // They sent something and saw typing dots, so silence reads as broken.
+      await space.send(FALLBACK_REPLY);
       return;
     }
 

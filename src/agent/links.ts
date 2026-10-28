@@ -105,3 +105,23 @@ export function stripUnknownLinks(text: string, searched: Set<string>, saved: Se
     .map((line) => line.trim())
     .join("\n");
 }
+
+// Tracking and share parameters. They don't change the page, and a DICE or Branch link carries
+// hundreds of characters of them, enough to eat a reply's token budget when Claude copies the link.
+const TRACKING_PARAM = /^(utm_\w+|dice_\w+|_branch_\w+|fbclid|gclid|gbraid|wbraid|dclid|msclkid|mc_cid|mc_eid|igsh|igshid|ig_rid|si|s_src|ref_src|cplk|rpxt|_gl|mibextid|ttclid|twclid|li_fat_id)$/i;
+
+/** The message with every link's tracking parameters cut, so "posh.vip/e/x?utm_source=ig" reads as "posh.vip/e/x". */
+export function cleanLinks(text: string): string {
+  return text.replace(LINK, (link) => {
+    const trailing = link.match(TRAILING)?.[0] ?? "";
+    const body = trailing ? link.slice(0, -trailing.length) : link;
+    if (!/^https?:\/\//i.test(body) || !body.includes("?")) return link;
+    try {
+      const url = new URL(body);
+      for (const key of [...url.searchParams.keys()]) if (TRACKING_PARAM.test(key)) url.searchParams.delete(key);
+      return `${url.toString().replace(/\?$/, "")}${trailing}`;
+    } catch {
+      return link;
+    }
+  });
+}

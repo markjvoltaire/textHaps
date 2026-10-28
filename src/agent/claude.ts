@@ -334,7 +334,8 @@ export async function generateReply(input: {
       // Streamed so a web search is spotted the moment it starts, not after it finishes.
       const stream = anthropic.messages.stream({
         model: MODEL,
-        max_tokens: 1024,
+        // Thinking shares this budget with the reply and tool calls, and a tool call can carry a long link.
+        max_tokens: 4096,
         // Also caches up to the newest message, so this reply's next tool round reads the whole
         // conversation from cache instead of reprocessing it.
         cache_control: { type: "ephemeral" },

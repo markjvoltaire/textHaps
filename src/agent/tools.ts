@@ -816,19 +816,25 @@ export async function runTool(
         return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
       }
       const saves = await listSaves(profile.id);
-      const matches = saves.filter((save) => {
-        const saved = (save.title ?? save.url ?? "").toLowerCase();
-        return saved && (saved.includes(title) || title.includes(saved));
-      });
+      // The save for the link they sent is the one, even when other saves share its name (an
+      // Instagram post and the DICE page for the same night).
+      const linked = linkGiven ? saves.filter((save) => save.url && isExactLink(save.url, [linkGiven])) : [];
+      const matches = linked.length
+        ? linked.slice(0, 1)
+        : saves.filter((save) => {
+            const saved = (save.title ?? save.url ?? "").toLowerCase();
+            return saved && (saved.includes(title) || title.includes(saved));
+          });
       // A link nobody could read (Posh, Partiful pages that only render in a browser) never got saved.
       // The rsvp's browser can open it, so save it now under the name they confirmed.
-      if (matches.length === 0 && linkGiven) {
+      if (linkGiven && !linked.length) {
+        matches.length = 0;
         matches.push(await saveEvent({ profileId: profile.id, url: linkGiven, title: asString(input.title) }));
       }
       if (matches.length !== 1) {
         return {
           error: matches.length ? "more_than_one" : "not_saved",
-          hint: matches.length ? "Ask which one they mean." : "Save the event with save_event first, then rsvp.",
+          hint: matches.length ? "More than one save has that name. Call rsvp again with the event's link as url." : "Save the event with save_event first, then rsvp.",
           saves: saves.map((save) => save.title ?? save.url),
         };
       }
