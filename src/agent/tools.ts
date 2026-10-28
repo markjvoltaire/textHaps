@@ -268,7 +268,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "rsvp",
     description:
-      "RSVP them to a free event on its site: Haps opens the page in a browser and fills the form with their name and email, then texts them how it went. Only after your last message asked to rsvp them with their full name, email, and the event's name, and they said yes. The event has to be saved first. It runs in the background, so reply that you're on it.",
+      "RSVP them to a free event on its site: Haps opens the page in a browser and fills the form with their name and email, then texts them how it went. Only after your last message asked to rsvp them with their full name, email, and the event's name, and they said yes. The event has to be saved first, unless it's a link that couldn't be read: then pass the link as url and the name they call it as title. It runs in the background, so reply that you're on it.",
     input_schema: {
       type: "object",
       required: ["title"],
@@ -276,7 +276,8 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         title: { type: "string", description: "The saved event's title, as listed under their saves" },
         url: {
           type: "string",
-          description: "The event's page, when the save has none (a flyer): a link from search_events or web_search, or one they sent",
+          description:
+            "The event's page: a link they sent or one from search_events or web_search. Pass it when the save has no link (a flyer), or when there's no save because the link couldn't be read; the rsvp saves it",
         },
       },
       additionalProperties: false,
@@ -810,11 +811,20 @@ export async function runTool(
       if (!profile.full_name || !profile.email) {
         return { error: "missing_details", hint: "Haps needs their first and last name and their email to rsvp. Ask for whichever is missing." };
       }
+      const linkGiven = asString(input.url);
+      if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
+        return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
+      }
       const saves = await listSaves(profile.id);
       const matches = saves.filter((save) => {
         const saved = (save.title ?? save.url ?? "").toLowerCase();
         return saved && (saved.includes(title) || title.includes(saved));
       });
+      // A link nobody could read (Posh, Partiful pages that only render in a browser) never got saved.
+      // The rsvp's browser can open it, so save it now under the name they confirmed.
+      if (matches.length === 0 && linkGiven) {
+        matches.push(await saveEvent({ profileId: profile.id, url: linkGiven, title: asString(input.title) }));
+      }
       if (matches.length !== 1) {
         return {
           error: matches.length ? "more_than_one" : "not_saved",
@@ -831,10 +841,6 @@ export async function runTool(
           error: "not_confirmed",
           hint: `Ask first, in one line: rsvp you as ${profile.full_name}, ${profile.email}, for ${save.title ?? "it"}? Call rsvp once they say yes.`,
         };
-      }
-      const linkGiven = asString(input.url);
-      if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])])) {
-        return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
       }
       // A flyer has no link: look for its page the same way a flyer save is verified, so the rsvp doesn't hang on Claude finding it.
       const url =

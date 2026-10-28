@@ -23,7 +23,8 @@ const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me inst
 const PHOTO_FALLBACK_REPLY = "couldn't open that pic\ncan you screenshot it and send that?";
 const ANSWER_REPLY = "got it, finishing up";
 const SKIP_REPLY = "no worries, i'll skip it";
-const SKIP = /^(skip|pass|nah|no|nope|nvm|never ?mind|i'?d rather not|rather not|don'?t want to)\b/i;
+// The whole message, so "pass code is 1234" or "no problem, it's 305..." is still an answer.
+const SKIP = /^(skip|pass|nah|no|nope|nvm|never ?mind|i'?d rather not|rather not|don'?t want to)[\s.!]*$/i;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 /** A short message carrying a 4-8 digit code, like "482913" or "code is 4829". */
 function loginCode(text: string): string | null {
@@ -37,8 +38,8 @@ function loginCode(text: string): string | null {
 function rsvpAnswer(asking: RsvpAsk | null, text: string): string | null {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > 300) return null;
+  if (asking === "code") return loginCode(trimmed) ?? (SKIP.test(trimmed) ? RSVP_SKIP : null);
   if (SKIP.test(trimmed)) return RSVP_SKIP;
-  if (asking === "code") return loginCode(trimmed);
   return trimmed.endsWith("?") ? null : trimmed;
 }
 /** What a photo is in the chat history. Claude sees the image itself only on the turn it arrives. */

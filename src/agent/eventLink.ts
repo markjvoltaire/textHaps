@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { startObservation } from "@langfuse/tracing";
-import { fetchPages } from "../search/exa.ts";
+import { EVENT_DOMAINS, fetchPages } from "../search/exa.ts";
 import { INSTAGRAM_POST, instagramPost } from "../search/monid.ts";
 import { formatError } from "../utils/text.ts";
 import { LINK, normalizeLink, stripLinks } from "./links.ts";
@@ -200,9 +200,65 @@ export async function extractEvent(pageTitle: string, pageText: string, url = ""
   }
 }
 
+const DIRECT_TIMEOUT_MS = 6000;
+const DIRECT_MAX_BYTES = 2_000_000;
+const DIRECT_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+  Accept: "text/html",
+};
+
+function onTicketingSite(url: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(url);
+    const host = hostname.toLowerCase();
+    return protocol === "https:" && EVENT_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+function decodeEntities(text: string): string {
+  return text.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+/**
+ * A ticketing page read straight from the site, for when Exa can't crawl it (Posh). These pages render in
+ * the browser, but their title, description, and schema.org Event data (date, time, address, price) are in
+ * the HTML. Only ticketing sites, and every redirect is checked too, so a link can't point this at anything else.
+ */
+async function fetchTicketingPage(url: string): Promise<{ title: string; text: string } | undefined> {
+  let next = url;
+  for (let hop = 0; hop < 3; hop += 1) {
+    if (!onTicketingSite(next)) return undefined;
+    const response = await fetch(next, { headers: DIRECT_HEADERS, redirect: "manual", signal: AbortSignal.timeout(DIRECT_TIMEOUT_MS) });
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      next = new URL(location, next).toString();
+      continue;
+    }
+    if (!response.ok) return undefined;
+    const html = (await response.text()).slice(0, DIRECT_MAX_BYTES);
+    const title = decodeEntities(html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim() ?? "");
+    const description = decodeEntities(html.match(/<meta[^>]+name="description"[^>]+content="([^"]*)"/i)?.[1] ?? "");
+    // The Event block, whether in a plain ld+json script or escaped inside a Next.js payload.
+    const unescaped = html.replace(/\\"/g, '"').replace(/\\n/g, "\n");
+    const at = unescaped.search(/"@type":\s*"Event"/);
+    const event = at >= 0 ? unescaped.slice(Math.max(0, at - 100), at + 2500) : "";
+    return { title, text: [description, event].filter(Boolean).join("\n\n") };
+  }
+  return undefined;
+}
+
 /** Instagram shows scrapers a login wall, so a post is read from its caption instead of its page. */
 async function fetchPage(url: string): Promise<{ title: string; text: string } | undefined> {
-  if (!INSTAGRAM_POST.test(url)) return (await fetchPages([url]))[0];
+  if (!INSTAGRAM_POST.test(url)) {
+    const page = (await fetchPages([url]).catch((err: unknown) => {
+      console.warn(`[event-link] exa couldn't read ${url}: ${formatError(err)}`);
+      return [];
+    }))[0];
+    if (page && page.text.length >= 40) return page;
+    return (await fetchTicketingPage(url).catch(() => undefined)) ?? page;
+  }
   const post = await instagramPost(url);
   if (!post) return undefined;
   const lines = [`Posted ${post.posted} by ${post.name ? `${post.name} (@${post.author})` : `@${post.author}`}`, post.location && `Tagged location: ${post.location}`, "", post.caption];
