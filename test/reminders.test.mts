@@ -1,6 +1,6 @@
 // Run: npx tsx test/reminders.test.mts. Pure functions, no network.
 import assert from "node:assert/strict";
-import { localTime, reminderTimes, zoneFor } from "../src/reminders/schedule.ts";
+import { localTime, reminderDeadline, reminderTimes, zoneFor } from "../src/reminders/schedule.ts";
 
 const NY = "America/New_York";
 const iso = (ms: number | undefined) => (ms === undefined ? undefined : new Date(ms).toISOString());
@@ -22,6 +22,29 @@ test("local time follows the clock change: noon is -4 in october, -5 in november
   assert.equal(iso(localTime("2026-10-20", 12, NY)), "2026-10-20T16:00:00.000Z");
   assert.equal(iso(localTime("2026-11-14", 12, NY)), "2026-11-14T17:00:00.000Z");
   assert.equal(iso(localTime("2026-11-14", 12, "America/Los_Angeles")), "2026-11-14T20:00:00.000Z");
+});
+
+test("doors at 12:30am sunday is a saturday night: check-in fri 7pm, heads-up sat noon, follow-up sun 1pm", () => {
+  const save = { starts_at: "2026-11-08T00:30:00-05:00", event_date: "2026-11-08" };
+  const times = reminderTimes(save, NY, Date.parse("2026-10-29T12:00:00Z"));
+  assert.equal(iso(times.check_in), "2026-11-07T00:00:00.000Z");
+  assert.equal(iso(times.day_of), "2026-11-07T17:00:00.000Z");
+  assert.equal(iso(times.follow_up), "2026-11-08T18:00:00.000Z");
+  // The check-in is good until saturday starts, the heads-up until doors.
+  assert.equal(iso(reminderDeadline("check_in", save, NY, times.check_in!)), "2026-11-07T05:00:00.000Z");
+  assert.equal(iso(reminderDeadline("day_of", save, NY, times.day_of!)), "2026-11-08T05:30:00.000Z");
+});
+
+test("the same party saved with saturday's date and a 12:30am start is still a saturday night", () => {
+  const times = reminderTimes({ starts_at: "2026-11-08T00:30:00-05:00", event_date: "2026-11-07" }, NY, Date.parse("2026-10-29T12:00:00Z"));
+  assert.equal(iso(times.check_in), "2026-11-07T00:00:00.000Z");
+  assert.equal(iso(times.day_of), "2026-11-07T17:00:00.000Z");
+});
+
+test("a 5am start is a morning, not the night before", () => {
+  const times = reminderTimes({ starts_at: "2026-11-08T05:00:00-05:00", event_date: "2026-11-08" }, NY, Date.parse("2026-10-29T12:00:00Z"));
+  assert.equal(iso(times.check_in), "2026-11-08T00:00:00.000Z");
+  assert.equal(times.day_of, undefined);
 });
 
 test("days before crosses a month", () => {

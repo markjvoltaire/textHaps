@@ -40,10 +40,36 @@ export function localTime(date: string, hour: number, zone: string, daysBefore =
   return wall - zoneOffset(zone, first);
 }
 
+/** A start before this hour belongs to the night before: doors at 12:30am sunday is a saturday night out. */
+const NIGHT_ENDS = 5;
+
+/** The day before `date` (YYYY-MM-DD). */
+function dayBefore(date: string): string {
+  return new Date(Date.UTC(+date.slice(0, 4), +date.slice(5, 7) - 1, +date.slice(8, 10) - 1)).toISOString().slice(0, 10);
+}
+
+/** For an event that starts after midnight, the day whose night it is (YYYY-MM-DD). Null for any other start. */
+export function lateNightOf(save: Pick<SaveRow, "starts_at">, zone: string): string | null {
+  const start = save.starts_at ? Date.parse(save.starts_at) : NaN;
+  if (Number.isNaN(start)) return null;
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit" })
+      .formatToParts(new Date(start))
+      .map((part) => [part.type, part.value]),
+  );
+  return +parts.hour! < NIGHT_ENDS ? dayBefore(`${parts.year}-${parts.month}-${parts.day}`) : null;
+}
+
+/** The day reminders count from: the night it belongs to, so "tomorrow", "today" and "last night" are said on the right days. */
+function nightOf(save: Pick<SaveRow, "starts_at" | "event_date">, zone: string): string | null {
+  return save.event_date && (lateNightOf(save, zone) ?? save.event_date);
+}
+
 /**
  * When to text about a saved event. A check-in the day before at 7pm ("still going tomorrow?"),
  * a heads-up at noon the day of (skipped for something that starts before 2pm, since the night
- * before covers it), and a follow-up at 1pm the day after ("did you go? how was it?").
+ * before covers it), and a follow-up at 1pm the day after ("did you go? how was it?"). A party that
+ * starts after midnight counts as the night before, so 12:30am sunday is reminded about as saturday.
  * Anything already past, or too soon after saving, is left out.
  */
 export function reminderTimes(
@@ -51,14 +77,15 @@ export function reminderTimes(
   zone: string,
   now = Date.now(),
 ): Partial<Record<ReminderKind, number>> {
-  if (!save.event_date) return {};
+  const night = nightOf(save, zone);
+  if (!night) return {};
   const start = save.starts_at ? Date.parse(save.starts_at) : null;
-  const early = start !== null && start < localTime(save.event_date, 14, zone);
+  const early = start !== null && start < localTime(night, 14, zone);
   const times: Partial<Record<ReminderKind, number>> = {
-    check_in: localTime(save.event_date, 19, zone, 1),
-    follow_up: localTime(save.event_date, 13, zone, -1),
+    check_in: localTime(night, 19, zone, 1),
+    follow_up: localTime(night, 13, zone, -1),
   };
-  if (!early) times.day_of = localTime(save.event_date, 12, zone);
+  if (!early) times.day_of = localTime(night, 12, zone);
   for (const kind of Object.keys(times) as ReminderKind[]) {
     if (times[kind]! < now + MIN_LEAD_MS) delete times[kind];
   }
@@ -77,10 +104,11 @@ export function reminderDeadline(
   sendAt: number,
 ): number {
   // Rows are only planned with a date, but a later save can clear it.
-  if (!save.event_date) return sendAt + 3 * HOUR;
-  if (kind === "check_in") return localTime(save.event_date, 0, zone);
-  if (kind === "day_of") return save.starts_at ? Date.parse(save.starts_at) : localTime(save.event_date, 18, zone);
-  return localTime(save.event_date, 0, zone, -3);
+  const night = nightOf(save, zone);
+  if (!night) return sendAt + 3 * HOUR;
+  if (kind === "check_in") return localTime(night, 0, zone);
+  if (kind === "day_of") return save.starts_at ? Date.parse(save.starts_at) : localTime(night, 18, zone);
+  return localTime(night, 0, zone, -3);
 }
 
 /**

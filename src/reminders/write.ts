@@ -4,7 +4,7 @@ import type { Profile, SaveRow } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import { stripLinks } from "../agent/links.ts";
 import { formatError } from "../utils/text.ts";
-import type { ReminderKind } from "./schedule.ts";
+import { lateNightOf, type ReminderKind } from "./schedule.ts";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -28,6 +28,13 @@ const STYLE = `You are Haps, a friend who knows the scene, texting over iMessage
 
 function when(save: SaveRow, zone: string): string {
   const options: Intl.DateTimeFormatOptions = { timeZone: zone, weekday: "long", month: "long", day: "numeric" };
+  const night = lateNightOf(save, zone);
+  if (night) {
+    // "Sunday 12:30 AM" reads as the wrong day, so it's said as the night it belongs to.
+    const day = new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" }).format(new Date(`${night}T12:00:00Z`));
+    const time = new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(new Date(save.starts_at!));
+    return `${day}, late night: starts after midnight at ${time}, so call it ${day.split(",")[0]!.toLowerCase()} night`;
+  }
   if (save.starts_at) {
     return new Intl.DateTimeFormat("en-US", { ...options, hour: "numeric", minute: "2-digit" }).format(new Date(save.starts_at));
   }
