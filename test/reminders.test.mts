@@ -28,13 +28,13 @@ test("days before crosses a month", () => {
   assert.equal(iso(localTime("2026-12-01", 18, NY, 2)), "2026-11-29T23:00:00.000Z");
 });
 
-test("MOVE, sat nov 14 10pm, saved oct 26: check-in thu 6pm, heads-up sat noon, follow-up sun 1pm", () => {
+test("MOVE, sat nov 14 10pm, saved oct 26: check-in fri 7pm, heads-up sat noon, follow-up sun 1pm", () => {
   const times = reminderTimes(
     { starts_at: "2026-11-14T22:00:00-05:00", event_date: "2026-11-14" },
     NY,
     Date.parse("2026-10-27T01:00:00Z"),
   );
-  assert.equal(iso(times.check_in), "2026-11-12T23:00:00.000Z");
+  assert.equal(iso(times.check_in), "2026-11-14T00:00:00.000Z");
   assert.equal(iso(times.day_of), "2026-11-14T17:00:00.000Z");
   assert.equal(iso(times.follow_up), "2026-11-15T18:00:00.000Z");
 });
@@ -44,13 +44,14 @@ test("no start time yet still gets both, on the date alone", () => {
   assert.ok(times.check_in && times.day_of);
 });
 
-test("a day party at 1pm gets its heads-up at 7pm the night before", () => {
+test("a day party at 1pm gets only the 7pm check-in the night before, no day-of heads-up", () => {
   const times = reminderTimes(
     { starts_at: "2026-11-15T13:00:00-05:00", event_date: "2026-11-15" },
     NY,
     Date.parse("2026-10-27T01:00:00Z"),
   );
-  assert.equal(iso(times.day_of), "2026-11-15T00:00:00.000Z");
+  assert.equal(iso(times.check_in), "2026-11-15T00:00:00.000Z");
+  assert.equal(times.day_of, undefined);
 });
 
 test("saved the night before: no check-in, heads-up still goes", () => {

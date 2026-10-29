@@ -21,7 +21,7 @@ import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
-    name: "web_search",
+    name: "find_places",
     description:
       "Search the web for places that aren't parties: wine bars, bars, restaurants, cafes, brunch, run clubs. Never use it for parties or club nights. Recommend only places the results back up, and don't make up hours or details.",
     input_schema: {
@@ -329,9 +329,9 @@ function isTasteSource(value: unknown): value is TasteSource {
 /** Per-reply state. Each reply gets its own, so one user's search never leaks into another's. */
 export type ToolSession = {
   webSearches: number;
-  /** Links web_search returned, the only page links a reply may pass on. */
+  /** Links find_places returned, the only page links a reply may pass on. */
   webUrls: Set<string>;
-  /** web_search results this reply, so the handler can attach the one place's own site as a card. */
+  /** find_places results this reply, so the handler can attach the one place's own site as a card. */
   webResults: WebResult[];
   /** Event pages search_events found this reply, so the ones the reply names keep their links for follow-ups. */
   eventPages: { title: string; url: string }[];
@@ -445,6 +445,14 @@ const MAX_WEB_SEARCHES = 3;
 /** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
 const MAX_EVENT_READS = 2;
 
+/**
+ * One line per search saying where the answer came from: Haps's curated recs database or the live web
+ * through Exa. The tool result carries the same source, so Langfuse traces show it too.
+ */
+function logSearch(tool: string, source: "curated" | "exa", query: string, metro: string | null, results: number): void {
+  console.log(`[search] tool=${tool} source=${source} metro=${metro ?? "none"} results=${results} query=${JSON.stringify(query)}`);
+}
+
 export async function runTool(
   profile: Profile,
   name: string,
@@ -452,7 +460,7 @@ export async function runTool(
   session: ToolSession,
 ): Promise<unknown> {
   switch (name) {
-    case "web_search": {
+    case "find_places": {
       const query = asString(input.query);
       if (!query) return { error: "query is required" };
       // A place rec is only as good as its fit, so the kind of spot (and for food, what they're
@@ -476,10 +484,12 @@ export async function runTool(
       if (metro && RECS_METROS.has(metro) && input.live !== true) {
         const recs = await searchRecs(query, metro, { taste: await currentTaste(profile, session) });
         keepRecLinks(recs, session);
+        logSearch("find_places", "curated", query, metro, recs.length);
         return {
+          source: "curated",
           count: recs.length,
           haps_recs: forClaude(recs),
-          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If none is near where they are or in their budget, call web_search again with live: true instead of sending one that's far. If your answer is about one place that has a url, end with that url alone on the last line.",
+          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If none is near where they are or in their budget, call find_places again with live: true instead of sending one that's far. If your answer is about one place that has a url, end with that url alone on the last line.",
         };
       }
       session.untrusted = true;
@@ -487,9 +497,11 @@ export async function runTool(
       const results = (await searchWeb(query)).map((result) => (isExaPage(result.url) ? { ...result, url: "" } : result));
       for (const result of results) if (result.url) session.webUrls.add(result.url);
       session.webResults.push(...results.filter((result) => result.url));
+      logSearch("find_places", "exa", query, metro, results.length);
       // Page text is labeled as data so instructions planted in it aren't mistaken for the user's.
       // The prompt alone was skipped (a "barcelona in wynwood" reply came back with no link), so it's repeated next to the results.
       return {
+        source: "exa",
         count: results.length,
         untrusted_web_content: results,
         hint: "If your answer is about one specific place, even to steer them away from it, end with that place's own website url from these results alone on the last line. Skip it if none of these is the place's own site.",
@@ -576,8 +588,10 @@ export async function runTool(
         const recs = await searchRecs(vibe, metro, { categories: NIGHT_CATEGORIES, taste: await currentTaste(profile, session) });
         keepRecLinks(recs, session);
         session.eventPages.push(...recs.flatMap((rec) => (rec.url ? [{ title: rec.name, url: rec.url }] : [])));
+        logSearch("search_events", "curated", vibe, metro, recs.length);
         const similar = await similarFor(profile, session, metro);
         return {
+          source: "curated",
           count: recs.length,
           haps_recs: forClaude(recs),
           ...similar,
@@ -599,8 +613,10 @@ export async function runTool(
       for (const page of pages) session.webUrls.add(page.url);
       for (const video of videos) session.webUrls.add(video.url);
       session.eventPages.push(...pages.map((page) => ({ title: page.title, url: page.url })));
+      logSearch("search_events", "exa", vibe, metro, pages.length + videos.length);
       const similar = await similarFor(profile, session, metro);
       return {
+        source: "exa",
         count: pages.length + videos.length,
         untrusted_event_pages: pages,
         untrusted_tiktok_videos: videos,

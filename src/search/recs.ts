@@ -2,13 +2,17 @@ import { getRecs, matchRecs, type RecRow } from "../db/recs.ts";
 import { embedQuery } from "./embed.ts";
 import { withTaste } from "./taste.ts";
 
-/** The embedding model takes ~400 MB, more than a 512 MB worker has room for. RECS_SEARCH=off turns it and recs search off. */
-export const RECS_SEARCH_ON = process.env.RECS_SEARCH !== "off";
+/**
+ * Whether Haps searches its own curated recs database. Off, every place and event search goes to the
+ * web (Exa) and the ~400 MB embedding model is never loaded, which a 512 MB worker needs.
+ * CURATED_RECS=off turns it off; RECS_SEARCH=off is the old name for the same switch.
+ */
+export const CURATED_RECS_ON = process.env.CURATED_RECS !== "off" && process.env.RECS_SEARCH !== "off";
 
 /** Metros with an approved recs list. Search there comes from the recs, not the live web. */
-export const RECS_METROS = new Set(RECS_SEARCH_ON ? ["miami", "la"] : []);
+export const RECS_METROS = new Set(CURATED_RECS_ON ? ["miami", "la"] : []);
 
-/** Recs that are nights out, for search_events. Everything else is a place for web_search. */
+/** Recs that are nights out, for search_events. Everything else is a place for find_places. */
 export const NIGHT_CATEGORIES = ["party", "club", "gay club", "live music", "listening bar", "lounge"];
 
 export type RecResult = Pick<

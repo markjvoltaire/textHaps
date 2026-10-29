@@ -4,7 +4,7 @@ import { placeLinkFor } from "../src/agent/placeLink.ts";
 
 const r = (url: string, title: string) => ({ url, title, published: null, highlights: [] });
 
-// The real web_search results for "sable wynwood" (the exa.ai page is blanked by web_search).
+// The real find_places results for "sable wynwood" (the exa.ai page is blanked by find_places).
 const SABLE = [
   r("https://www.sablemiami.com/", "Sable"),
   r("https://www.sablemiami.com/visit", "Visit — Sable"),

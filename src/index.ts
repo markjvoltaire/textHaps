@@ -6,7 +6,7 @@ import { handleMessage } from "./handlers/message.ts";
 import { startReminders } from "./reminders/send.ts";
 import { startTracing } from "./observability.ts";
 import { loadEmbedder } from "./search/embed.ts";
-import { RECS_SEARCH_ON } from "./search/recs.ts";
+import { CURATED_RECS_ON } from "./search/recs.ts";
 import { PROVIDER } from "./utils/provider.ts";
 import { formatError } from "./utils/text.ts";
 
@@ -27,7 +27,7 @@ for (const key of [
 startTracing();
 
 // Loaded at boot, not on the first search, so nobody waits for it. A failure only shows up as a failed search later.
-if (RECS_SEARCH_ON) loadEmbedder().catch((err: unknown) => console.error(`[embed] model failed to load: ${formatError(err)}`));
+if (CURATED_RECS_ON) loadEmbedder().catch((err: unknown) => console.error(`[embed] model failed to load: ${formatError(err)}`));
 
 const app = await Spectrum({
   projectId: process.env.PROJECT_ID!,
