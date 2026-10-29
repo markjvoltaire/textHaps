@@ -438,14 +438,17 @@ export async function generateReply(input: {
     }
     messages.push({ role: "assistant", content: response.content });
 
-    // Web searches and page reads only touch their own session counters, so they run side by side. The
-    // rest stay in order, since search_events reads the city update_profile just wrote.
+    // Saves run first, so "i love techno, find me something" searches with the taste it just learned.
+    // Then web searches and page reads, which only touch their own session counters, run side by side.
+    // The rest stay in order, since search_events reads the city update_profile just wrote.
     const blocks = response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === "tool_use");
     const parallel = (block: Anthropic.ToolUseBlock) => block.name === "find_places" || block.name === "read_event_link";
+    const saves: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of blocks.filter((block) => SAVE_TOOLS.has(block.name))) saves.push(await runBlock(block));
     const searches = blocks.filter(parallel).map(runBlock);
     const others: Anthropic.ToolResultBlockParam[] = [];
-    for (const block of blocks.filter((block) => !parallel(block))) others.push(await runBlock(block));
-    const results = [...(await Promise.all(searches)), ...others];
+    for (const block of blocks.filter((block) => !parallel(block) && !SAVE_TOOLS.has(block.name))) others.push(await runBlock(block));
+    const results = [...saves, ...(await Promise.all(searches)), ...others];
     const toolResults = blocks.map((block) => results.find((result) => result.tool_use_id === block.id)!);
 
     messages.push({ role: "user", content: toolResults });

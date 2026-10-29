@@ -447,6 +447,9 @@ const FOOD_ASK = /\b(eat|eats|food|hungry|dinner|lunch|brunch|breakfast|restaura
 const MAX_WEB_SEARCHES = 3;
 /** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
 const MAX_EVENT_READS = 2;
+/** Profile values and taste evidence are re-sent in the prompt on every reply, so they're kept short. */
+const MAX_STORED = 200;
+const MAX_LABEL = 80;
 
 /**
  * One line per search saying where the answer came from: Haps's curated recs database or the live web
@@ -634,6 +637,9 @@ export async function runTool(
       if (session.untrusted && (hasLink(asString(input.label)!) || hasLink(asString(input.evidence) ?? ""))) {
         return { error: "link_in_label", hint: "Labels and evidence are short taste words, not links." };
       }
+      if (asString(input.label)!.length > MAX_LABEL || (asString(input.evidence)?.length ?? 0) > MAX_STORED) {
+        return { error: "too_long", hint: "Keep it short, in their words: a few words for the label, one short line for evidence." };
+      }
       if (plantedByPage(asString(input.label)!, session)) {
         return { error: "not_from_user", hint: "That came from the event page. Only save tastes the user said themselves." };
       }
@@ -770,6 +776,10 @@ export async function runTool(
       }
       if (Object.keys(patch).length === 0) {
         return { error: "nothing_to_update" };
+      }
+      // Every value is re-sent in the prompt on every reply, so a pasted rant stays out.
+      if (Object.values(patch).some((value) => value.length > MAX_STORED)) {
+        return { error: "too_long", hint: "Keep it short, in their words: one short line per field." };
       }
       // A planted link saved here would come back in every later prompt.
       if (session.untrusted && Object.entries(patch).some(([field, value]) => field !== "email" && hasLink(value))) {
