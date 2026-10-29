@@ -4,7 +4,6 @@ import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { handleMessage } from "./handlers/message.ts";
 import { startReminders } from "./reminders/send.ts";
-import { startRsvps } from "./rsvp/start.ts";
 import { startTracing } from "./observability.ts";
 import { loadEmbedder } from "./search/embed.ts";
 import { RECS_SEARCH_ON } from "./search/recs.ts";
@@ -38,10 +37,9 @@ const app = await Spectrum({
 
 console.log(`Agent online. provider=${PROVIDER}`);
 
-// Texts Haps sends first (event reminders, rsvp updates) go to the conversation the event came from.
+// Texts Haps sends first (event reminders) go to the conversation the event came from.
 const spaceFor = (id: string) => (PROVIDER === "terminal" ? terminal(app).space.get(id) : imessage(app).space.get(id));
 startReminders(PROVIDER, spaceFor);
-startRsvps(PROVIDER, spaceFor);
 
 // One queue per sender: their messages stay in order, but a slow reply never blocks anyone else.
 const queues = new Map<string, Promise<void>>();

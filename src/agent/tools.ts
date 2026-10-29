@@ -4,9 +4,7 @@ import { recordPick, type ShownRec } from "../db/picks.ts";
 import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
 import { scheduleReminders, zoneFor } from "../reminders/schedule.ts";
 import { saveSharedRec } from "../recs/shared.ts";
-import { findFlyerPage, verifyFlyerEvent } from "../recs/verify.ts";
-import { RSVP_ON } from "../rsvp/run.ts";
-import { beginRsvp } from "../rsvp/start.ts";
+import { verifyFlyerEvent } from "../recs/verify.ts";
 import { lovedBySimilar, recordFeedback, VERDICTS } from "../db/feedback.ts";
 import { PROVIDER } from "../utils/provider.ts";
 import { formatError } from "../utils/text.ts";
@@ -19,7 +17,7 @@ import { NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../se
 import { refreshTasteEmbedding, tasteVector } from "../search/taste.ts";
 import { knownMetro, metroFor } from "../utils/metro.ts";
 import { cleanStart, describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
-import { cleanLinks, hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
+import { hasLink, isExactLink, LINK, normalizeLink } from "./links.ts";
 
 export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
@@ -265,38 +263,9 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
       additionalProperties: false,
     },
   },
-  {
-    name: "rsvp",
-    description:
-      "RSVP them to a free event on its site: Haps opens the page in a browser and fills the form with their name and email, then texts them how it went. Only after your last message asked to rsvp them with their full name, email, and the event's name, and they said yes. The event has to be saved first, unless it's a link that couldn't be read: then pass the link as url and the name they call it as title. It runs in the background, so reply that you're on it.",
-    input_schema: {
-      type: "object",
-      required: ["title"],
-      properties: {
-        title: { type: "string", description: "The saved event's title, as listed under their saves" },
-        url: {
-          type: "string",
-          description:
-            "The event's page: a link they sent or one from search_events or web_search. Pass it when the save has no link (a flyer), or when there's no save because the link couldn't be read; the rsvp saves it",
-        },
-      },
-      additionalProperties: false,
-    },
-  },
 ];
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
-
-/** Sites that block an automated rsvp, so Haps sends the link instead of starting one. */
-const BY_HAND = ["dice.fm"];
-
-function hostOf(url: string): string | undefined {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return undefined;
-  }
-}
 
 type ToolInput = Record<string, unknown>;
 
@@ -388,8 +357,6 @@ export type ToolSession = {
   recsOffered: Map<string, ShownRec>;
   /** The conversation this reply goes to, where reminders for a save get texted. */
   spaceId: string;
-  /** Haps's last message before this one, where an rsvp has to have been asked for and confirmed. */
-  lastReply: string;
 };
 
 /**
@@ -814,79 +781,6 @@ export async function runTool(
       }
       const logged = await recordPick({ profileId: profile.id, name: pickName, outcome, note: asString(input.note) });
       return { logged: { name: logged.name, outcome } };
-    }
-    case "rsvp": {
-      if (!RSVP_ON) return { error: "rsvp_off", hint: "Haps can't rsvp right now. Send them the event's link so they can do it in a tap." };
-      const title = asString(input.title)?.toLowerCase();
-      if (!title) return { error: "title is required" };
-      if (!profile.full_name || !profile.email) {
-        return { error: "missing_details", hint: "Haps needs their first and last name and their email to rsvp. Ask for whichever is missing." };
-      }
-      // Compared with tracking parameters cut on both sides, so the long share link and the clean one are the same event.
-      const sent = asString(input.url);
-      const linkGiven = sent ? cleanLinks(sent) : undefined;
-      if (linkGiven && !isExactLink(linkGiven, [...session.webUrls, ...session.savedUrls, ...(session.userText.match(LINK) ?? [])].map(cleanLinks))) {
-        return { error: "url_not_from_user_or_search", hint: "Only use the save's link, one they sent, or one a search returned." };
-      }
-      const saves = await listSaves(profile.id);
-      // The save for the link they sent is the one, even when other saves share its name (an
-      // Instagram post and the DICE page for the same night).
-      const linked = linkGiven ? saves.filter((save) => save.url && isExactLink(cleanLinks(save.url), [linkGiven])) : [];
-      const matches = linked.length
-        ? linked.slice(0, 1)
-        : saves.filter((save) => {
-            const saved = (save.title ?? save.url ?? "").toLowerCase();
-            return saved && (saved.includes(title) || title.includes(saved));
-          });
-      // A link nobody could read (Posh, Partiful pages that only render in a browser) never got saved.
-      // The rsvp's browser can open it, so save it now under the name they confirmed.
-      if (linkGiven && !linked.length) {
-        matches.length = 0;
-        matches.push(await saveEvent({ profileId: profile.id, url: linkGiven, title: asString(input.title) }));
-      }
-      if (matches.length !== 1) {
-        return {
-          error: matches.length ? "more_than_one" : "not_saved",
-          hint: matches.length ? "More than one save has that name. Call rsvp again with the event's link as url." : "Save the event with save_event first, then rsvp.",
-          saves: saves.map((save) => save.title ?? save.url),
-        };
-      }
-      const save = matches[0]!;
-      // They have to have seen exactly who Haps would sign up, and for what, right before saying yes.
-      const asked = session.lastReply.toLowerCase();
-      const named = (save.title ?? "").toLowerCase().split(/\s+/).filter((word) => word.length >= 3);
-      if (!asked.includes(profile.email) || (named.length && !named.some((word) => asked.includes(word)))) {
-        return {
-          error: "not_confirmed",
-          hint: `Ask first, in one line: rsvp you as ${profile.full_name}, ${profile.email}, for ${save.title ?? "it"}? Call rsvp once they say yes.`,
-        };
-      }
-      // A flyer has no link: look for its page the same way a flyer save is verified, so the rsvp doesn't hang on Claude finding it.
-      const url =
-        save.url ??
-        linkGiven ??
-        (await findFlyerPage(profile, save).catch((err: unknown) => {
-          console.warn(`[rsvp] page search failed for save=${save.id}: ${formatError(err)}`);
-          return null;
-        }));
-      if (!url) {
-        return {
-          error: "no_link",
-          hint: "Haps searched and couldn't find this event's page, so nothing is running. Tell them you couldn't find where to rsvp, and ask if they have the link.",
-        };
-      }
-      // DICE refuses automated checkouts even through a residential IP (tested 2026-10-28), so a run
-      // there only burns minutes before handing back. Send the link now instead.
-      if (BY_HAND.some((domain) => (hostOf(url) ?? "").endsWith(domain))) {
-        return {
-          error: "rsvp_by_hand",
-          hint: "This site doesn't let Haps rsvp for them, and nothing is running. Send them the link so they can grab it in a tap.",
-          url,
-        };
-      }
-      const started = await beginRsvp({ profile, save, url, platform: PROVIDER, spaceId: session.spaceId });
-      if (!started) return { error: "already_running", hint: "Haps is already rsvping them for this. Tell them it's in progress." };
-      return { started: true, event: save.title, as: { name: profile.full_name, email: profile.email } };
     }
     default:
       return { error: `unknown tool ${name}` };

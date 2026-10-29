@@ -13,8 +13,7 @@
     "signals": "tsx src/signals/run.ts",
     "vectors": "tsx src/search/vectors.ts",
     "recs": "tsx src/recs/draft.ts",
-    "warm-model": "tsx src/search/warmModel.ts",
-    "rsvp": "tsx src/rsvp/try.ts"
+    "warm-model": "tsx src/search/warmModel.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.137.0",
@@ -25,10 +24,8 @@
     "@supabase/supabase-js": "^2.116.0",
     "dotenv": "^17.4.2",
     "ffmpeg-static": "^5.2.0",
-    "playwright-core": "1.49.1",
     "sharp": "^0.34.5",
     "spectrum-ts": "^12.8.0",
-    "stagehand-claude-sdk": "^0.1.0",
     "tsx": "^4.23.15"
   },
   "devDependencies": {

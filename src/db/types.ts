@@ -32,7 +32,7 @@ export type Profile = {
   /** Their taste as one vector, as pgvector text ("[0.1,...]"); null until they've shared a taste. */
   taste_embedding: string | null;
   email: string | null;
-  /** First and last name for RSVPs; name stays what they go by. */
+  /** First and last name; name stays what they go by. */
   full_name: string | null;
   background_set_at: string | null;
   contact_card_sent_at: string | null;
@@ -68,6 +68,4 @@ export type SaveRow = {
   /** They said yes to Haps texting them before it. */
   remind: boolean;
   created_at: string;
-  /** Haps's RSVP runs for it, newest first, when the query asked for them. */
-  rsvps?: { status: string; created_at: string }[];
 };

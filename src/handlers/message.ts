@@ -5,8 +5,7 @@ import { generateReply, LINKS_NOTE } from "../agent/claude.ts";
 import { recordShown, recsNamedIn, type ShownRec } from "../db/picks.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
-import { putAnswer, RSVP_SKIP, waitingForAnswer, type RsvpAsk } from "../db/rsvps.ts";
-import { markBackgroundCleared, updateProfile, upsertProfile, type ProfilePatch } from "../db/profiles.ts";
+import { markBackgroundCleared, upsertProfile } from "../db/profiles.ts";
 import type { Profile } from "../db/types.ts";
 import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
@@ -22,27 +21,6 @@ const FALLBACK_REPLY = "ugh my bad, something glitched\ntry me again?";
 const RATE_LIMIT_REPLY = "ok i need a breather, hit me back in a bit";
 const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me instead?";
 const PHOTO_FALLBACK_REPLY = "couldn't open that pic\ncan you screenshot it and send that?";
-const ANSWER_REPLY = "got it, finishing up";
-const SKIP_REPLY = "no worries, i'll skip it";
-// The whole message, so "pass code is 1234" or "no problem, it's 305..." is still an answer.
-const SKIP = /^(skip|pass|nah|no|nope|nvm|never ?mind|i'?d rather not|rather not|don'?t want to)[\s.!]*$/i;
-const EMAIL = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
-/** A short message carrying a 4-8 digit code, like "482913" or "code is 4829". */
-function loginCode(text: string): string | null {
-  if (text.length > 40) return null;
-  return text.match(/(?:^|\D)(\d{4,8})(?:\D|$)/)?.[1] ?? null;
-}
-/**
- * Their text as the answer to what the rsvp asked, or null when it isn't one (a question back, a new
- * topic), so it goes to Claude instead. A code has to look like a code; anything else is taken as given.
- */
-function rsvpAnswer(asking: RsvpAsk | null, text: string): string | null {
-  const trimmed = text.trim();
-  if (!trimmed || trimmed.length > 300) return null;
-  if (asking === "code") return loginCode(trimmed) ?? (SKIP.test(trimmed) ? RSVP_SKIP : null);
-  if (SKIP.test(trimmed)) return RSVP_SKIP;
-  return trimmed.endsWith("?") ? null : trimmed;
-}
 /** What a photo is in the chat history. Claude sees the image itself only on the turn it arrives. */
 const PHOTO_TURN = "(sent a photo)";
 // Phone photos run 2-6 MB; anything far past that isn't a flyer.
@@ -179,34 +157,6 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
   }
 
-  // An rsvp waiting on them (a login code, their phone, an address) gets their next text as the answer.
-  // Codes expire in minutes, and passing an answer on needs no Claude.
-  const waiting = photo ? null : await waitingForAnswer(profile.id).catch((err: unknown) => {
-    console.warn(`[rsvp] answer lookup failed for sender=${senderId}:`, formatError(err));
-    return null;
-  });
-  const answer = waiting ? rsvpAnswer(waiting.asking, text) : null;
-  if (waiting && answer) {
-    await putAnswer(waiting.id, answer);
-    console.log(`[rsvp] answer in for id=${waiting.id} asking=${waiting.asking}`);
-    const reply = answer === RSVP_SKIP ? SKIP_REPLY : ANSWER_REPLY;
-    await space.send(reply);
-    // Name and email are theirs for next time too. Codes and everything else stay with this rsvp.
-    const patch: ProfilePatch = {};
-    if (waiting.asking === "full_name" && answer.split(/\s+/).length >= 2) patch.full_name = answer;
-    if (waiting.asking === "email" && EMAIL.test(answer)) patch.email = answer.toLowerCase();
-    if (Object.keys(patch).length) {
-      await updateProfile(profile.id, patch).catch((err: unknown) =>
-        console.warn(`[rsvp] profile save failed for sender=${senderId}:`, formatError(err)),
-      );
-    }
-    // What they sent stays out of the history: it can be a code or an address.
-    await appendExchange(profile.id, senderId, `(answered the rsvp's ${waiting.asking ?? "question"})`, reply).catch((err: unknown) =>
-      console.error(`[history] save failed for sender=${senderId}:`, formatError(err)),
-    );
-    return;
-  }
-
   let image: ImageInput | undefined;
   if (photo) {
     try {
@@ -321,7 +271,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     }
     const sent = plan.map((item) => item.card ?? item.text).join("\n");
     span.update({ output: sent, metadata: { platform, richlinks: carded.size } });
-    // Event pages the reply named but didn't send, so a follow-up ("can you rsvp") can still send the link.
+    // Event pages the reply named but didn't send, so a follow-up ("send the link") can still send the link.
     const unsent = eventLinks.filter((item) => !carded.has(item.url));
     const remembered = unsent.length
       ? `${sent}\n${LINKS_NOTE} ${unsent.map((item) => `${item.title} ${item.url}`).join(" · ")})`

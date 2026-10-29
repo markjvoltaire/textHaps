@@ -15,7 +15,7 @@ export type AgentReply = {
   text: string;
   /** The one place's own site when the reply is about a single place from web_search, sent as a card. */
   placeLink: string | null;
-  /** Event pages the reply names, kept in history so "can you rsvp" or "send the link" can still get them. */
+  /** Event pages the reply names, kept in history so "send the link" can still get them. */
   eventLinks: { title: string; url: string }[];
   /** Recs searches returned this reply. The handler logs the ones that actually went out. */
   recsOffered: ShownRec[];
@@ -166,14 +166,7 @@ Event links:
 - When they say they're not going anymore or don't want it, call remove_save. When they say they're still going, just react like a friend.
 - Some of your earlier messages are ones you sent first, about an event they saved ("still thinking about going?", "did you end up going?"). Their next message is often the answer to that.
 - When they tell you whether they went to something and how it was, call record_feedback once, with what they said in their words. React like a friend who wants the details, and if it tells you something lasting about their taste ("way too packed for me", "need more nights like that"), save it with remember_taste too. If they didn't go, don't make them explain.
-- You can rsvp them to free events with the rsvp tool: a browser fills the event's form with their name and email, and they get a text when it's done. When they want to rsvp to a free event:
-  - It has to be saved first (save_event). If you don't have their first and last name or email, ask for what's missing.
-  - A flyer save has no page, and that's fine: the rsvp tool looks it up. If it can't find one, say so and ask if they have the link.
-  - A link you couldn't read can still be rsvped: the rsvp opens it in a real browser. Don't ask them for the details first. Confirm with what they call the event (or the name in the link), then call rsvp with that title and the link as url.
-  - Ask once, in one line with their full name, email, and the event's name: "rsvp you as Jordan Lee, jordan@email.com, for Sister Nancy tonight?" On yes, call rsvp. Only when it returns started: true, say you're on it in a few words. If it returns an error, nothing is running: follow its hint and never say you're on it. Don't promise it's done; the text comes when it is.
-  - Whether an rsvp is running comes only from their saves: "rsvp in progress" or "rsvped" on the save. Earlier turns saying you're on it don't count, since a run can fail to start. If the save shows neither and they ask to rsvp, confirm and call rsvp; if the tool says it's already running, tell them that.
-  - While it runs, the rsvp may text them for something the form needs (a login code, their phone, an address), and their next text goes straight to it. If they ask about that, tell them to just send the answer.
-- You can't buy tickets or pay for anything. For paid events, or when they ask for the link, send that event's page url alone on the last line so they can do it in a tap. Never tell them to go search for it.
+- You can't rsvp, book, reserve, buy tickets, or pay for anything yet. When they ask you to rsvp, book, reserve, or get tickets, say it's coming soon with a little wit and that you'll let them know when it's live, in your own words each time, e.g. "booking's still in the oven, i'll hit you the second it's ready" or "can't hold a table for you yet, that one's coming soon fr" then "i'll let you know when it drops". Then send that place's or event's page url alone on the last line so they can do it themselves in a tap. When they just ask for the link, send it the same way. Never tell them to go search for it.
 - Your earlier messages may end with a "${LINKS_NOTE} ...)" note listing the pages for events you named. It's only for you: the user never saw it, and you never write one. Use those urls for follow-ups about those events.
 
 Other tools:
@@ -184,7 +177,7 @@ Other tools:
 - Saving never changes what you say back. So when the only tools you need are remember_taste, forget_taste, update_profile, or record_pick, write your whole reply first, then make those calls after it in the same response. You won't get another turn, so never make those calls without the reply before them. That reply is texted to them word for word: only what you'd say to them, never a word about saving, tools, or your plan ("save these", "save that, then", "calls below").
 - If you already wrote your answer next to a tool call, don't repeat it after.
 - Don't say you're searching, and never narrate your thinking or what you're checking ("budget is missing, so i'll ask", "saving that"). Every word you write gets texted to them. Just answer.
-- Answer their latest message. Earlier turns are only context: once something is done or dropped, don't bring it back, follow up on it, or correct what you said about it unless they ask. That includes an rsvp you started: Haps texts them when it's done, so don't follow up on it unless they ask.
+- Answer their latest message. Earlier turns are only context: once something is done or dropped, don't bring it back, follow up on it, or correct what you said about it unless they ask.
 - Once onboarding is complete, for a greeting or small talk, send one line back like a friend would, e.g. "hey, it's friday, what's up" (use their name only if it's saved above), and stop there. No second line steering them toward plans: no "want something tonight?", no "x or y?" choices, no hints at their taste. They'll say what they want. Don't search or bring back earlier recs.
 
 How you text:
@@ -305,7 +298,6 @@ export async function generateReply(input: {
     tasteChanged: false,
     recsOffered: new Map(),
     spaceId: input.spaceId,
-    lastReply: input.history.findLast((turn) => turn.role === "assistant")?.content ?? "",
   };
   // Claude sometimes writes the answer in the same turn as a tool call (recs, then
   // remember_taste), so that text is kept too. finish() decides how it joins the final turn.
