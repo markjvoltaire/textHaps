@@ -35,6 +35,7 @@ const session = (userMessage: string, history = "") => ({
   webResults: [] as any[],
   savedUrls: new Set<string>(),
   userText: `${history}\n${userMessage}`,
+  saidText: `${history}\n${userMessage}`,
   userMessage,
   eventReads: new Map<string, Promise<any>>(),
   linkRecReads: 0,

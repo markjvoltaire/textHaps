@@ -343,11 +343,14 @@ function asStringArray(value: unknown): string[] | undefined {
 
 const plain = (text: string) => ` ${text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
 
-/** Whether the event page says `value` and the user never did, so a page can't pick their city, name, or taste. */
-function plantedByPage(value: string, session: ToolSession): boolean {
+/**
+ * Whether the event page says `value` and the user never did, so a page can't pick their city, name, or taste.
+ * Checks saidText (user turns only), not userText: Haps repeating a flyer's words doesn't make them the user's.
+ */
+export function plantedByPage(value: string, session: ToolSession): boolean {
   if (!session.pageText) return false;
   const wanted = plain(value);
-  return plain(session.pageText).includes(wanted) && !plain(session.userText).includes(wanted);
+  return plain(session.pageText).includes(wanted) && !plain(session.saidText).includes(wanted);
 }
 
 function isTasteKind(value: unknown): value is TasteKind {
@@ -375,6 +378,8 @@ export type ToolSession = {
   savedUrls: Set<string>;
   /** The user's own text this reply (chat plus current message), the only other source of links. */
   userText: string;
+  /** Only the user's own turns plus the current message, with photo text stripped. The check for text planted by a page; unlike userText it never counts Haps's replies. */
+  saidText: string;
   /** The thread before this message. An email must show up here first, so it was repeated back and confirmed. */
   earlierText: string;
   /** Just the message being answered, the only place read_event_link accepts a link from. */
@@ -731,7 +736,11 @@ export async function runTool(
       if (!name || !category) return { error: "name and category are required" };
       const reason = asString(input.reason) ?? null;
       const neighborhood = asString(input.neighborhood) ?? null;
-      if ([name, category, reason ?? "", neighborhood ?? ""].some((value) => plantedByPage(value, session) || (session.untrusted && hasLink(value)))) {
+      // category is a word Claude picks ("bar"), not something the user said, so only the link check covers it.
+      if (
+        [name, reason ?? "", neighborhood ?? ""].some((value) => plantedByPage(value, session)) ||
+        [name, category, reason ?? "", neighborhood ?? ""].some((value) => session.untrusted && hasLink(value))
+      ) {
         return { error: "not_from_user", hint: "Only save places the user named themselves, with no links." };
       }
       if (name.length > MAX_LABEL || (reason?.length ?? 0) > MAX_STORED) {

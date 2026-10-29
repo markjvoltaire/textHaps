@@ -3,6 +3,7 @@ import { startObservation } from "@langfuse/tracing";
 import { isOnboarded, missingOnboarding, PROFILE_FIELDS, unknownTopics } from "../db/profiles.ts";
 import type { Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
+import { photoTextIn, saidTextOf, withoutPhotoText } from "../memory/photoText.ts";
 import type { ShownRec } from "../db/picks.ts";
 import { formatSave } from "../db/saves.ts";
 import type { ImageInput } from "../utils/image.ts";
@@ -262,7 +263,11 @@ export async function generateReply(input: {
 }): Promise<AgentReply> {
   // What the user wrote plus Haps's own earlier replies (filtered when sent). Tool results
   // and the system prompt can echo planted text, so they never count as known.
-  const userText = [...input.history.map((turn) => turn.content), input.userMessage].join("\n");
+  const userText = [...input.history.map((turn) => withoutPhotoText(turn.content)), input.userMessage].join("\n");
+  // Flyer text kept in earlier turns is page text, not the user's words (see photoTextIn).
+  const earlierPhotoText = photoTextIn(input.history);
+  // What the user said, for the planted-text check (see saidTextOf).
+  const saidText = saidTextOf(input.history, input.userMessage);
   const messages: Anthropic.MessageParam[] = [
     ...input.history.map((turn) => ({ role: turn.role, content: turn.content })),
     {
@@ -296,14 +301,16 @@ export async function generateReply(input: {
     eventPages: [],
     savedUrls: new Set(input.saves.flatMap((save) => (save.url ? [save.url] : []))),
     // Text inside a photo can plant links too, so a photo makes the whole reply untrusted.
-    untrusted: hasLink(stored, true) || Boolean(input.images?.length),
+    untrusted: hasLink(stored, true) || Boolean(input.images?.length) || Boolean(earlierPhotoText),
     userText,
-    earlierText: input.history.map((turn) => turn.content).join("\n"),
+    saidText,
+    earlierText: input.history.map((turn) => withoutPhotoText(turn.content)).join("\n"),
     userMessage: input.userMessage,
     eventReads: new Map(),
     linkRecReads: 0,
     lovedSaved: new Set(),
-    pageText: "",
+    // The photo sent with this message counts as page text too, so a flyer read now can't plant a save now.
+    pageText: [earlierPhotoText, ...(input.images ?? []).map((image) => image.ocr ?? "")].filter(Boolean).join("\n"),
     storedText: bareLinks(stored).join("\n"),
     tasteChanged: false,
     recsOffered: new Map(),

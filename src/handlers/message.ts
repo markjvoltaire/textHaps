@@ -12,7 +12,8 @@ import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { prepareImage, type ImageInput } from "../utils/image.ts";
-import { cleanLinks } from "../agent/links.ts";
+import { cleanLinks, stripLinks } from "../agent/links.ts";
+import { PHOTO_TEXT_MARKER } from "../memory/photoText.ts";
 import { readPhotoText } from "../utils/ocr.ts";
 import { formatError, sanitizeOutgoingText } from "../utils/text.ts";
 import { transcribe } from "../voice/deepgram.ts";
@@ -23,6 +24,16 @@ const VOICE_FALLBACK_REPLY = "couldn't catch that voice note\ntext it to me inst
 const PHOTO_FALLBACK_REPLY = "couldn't open that pic\ncan you screenshot it and send that?";
 /** What a photo is in the chat history. Claude sees the image itself only on the turn it arrives. */
 const PHOTO_TURN = "(sent a photo)";
+// Enough for a flyer's lineup, prices, and fine print, without a screenshot of an essay filling every later prompt.
+const MAX_PHOTO_TEXT = 1500;
+/**
+ * The turn as kept in history, with the text read off the photo, so "who's on the lineup?" later has
+ * the flyer to go on instead of Claude's short summary. Labeled untrusted, and with no links in it.
+ */
+function withPhotoText(text: string, ocr: string): string {
+  const read = stripLinks(ocr).replace(/[ \t]+/g, " ").trim().slice(0, MAX_PHOTO_TEXT);
+  return read ? `${text}${PHOTO_TEXT_MARKER}${read}]` : text;
+}
 // Phone photos run 2-6 MB; anything far past that isn't a flyer.
 const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
 // A few minutes of voice note is well under this.
@@ -280,7 +291,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     recordShown(profile.id, recsNamedIn(sent, recsOffered)).catch((err: unknown) =>
       console.error(`[picks] logging shown recs failed for sender=${senderId}:`, formatError(err)),
     );
-    await appendExchange(profile.id, senderId, text, remembered).catch((err: unknown) => {
+    await appendExchange(profile.id, senderId, image?.ocr ? withPhotoText(text, image.ocr) : text, remembered).catch((err: unknown) => {
       console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
     });
 
