@@ -12,9 +12,9 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5-5";
 
 const TASKS: Record<ReminderKind, string> = {
   check_in:
-    "They saved this event a while back and it's in two days. Text them first: bring it back up like a friend would (\"yo that MOVE party at tomorrowland is saturday\") and ask if they're still thinking about going. Don't push.",
+    "They saved this event and it's tomorrow. Text them first: bring it back up like a friend would (\"yo that MOVE party at tomorrowland is tomorrow\") and ask if they're still going. Don't push.",
   day_of:
-    "This event they saved is coming up (today, or tomorrow morning if it starts early). Give them a quick heads-up with when and where, like a friend would. If they already said they're going, hype it a little; if they never said, ask if they're still going.",
+    "This event they saved is today. Give them a quick heads-up with when and where, like a friend would. If they already said they're going, hype it a little; if they never said, ask if they're still going.",
   follow_up:
     "This event they saved was yesterday (or last night). Ask if they went and how it was, like a friend who's curious, in one easy question (\"did you end up going to MOVE last night? how was it\"). If they said in the chat they weren't going, don't send anything like a guilt trip: just ask how their weekend went.",
 };

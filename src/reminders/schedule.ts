@@ -41,9 +41,9 @@ export function localTime(date: string, hour: number, zone: string, daysBefore =
 }
 
 /**
- * When to text about a saved event. A check-in 2 days out at 6pm ("still thinking about it?"),
- * a heads-up the day of (noon, or 7pm the night before for something that starts before 2pm),
- * and a follow-up at 1pm the day after ("did you go? how was it?").
+ * When to text about a saved event. A check-in the day before at 7pm ("still going tomorrow?"),
+ * a heads-up at noon the day of (skipped for something that starts before 2pm, since the night
+ * before covers it), and a follow-up at 1pm the day after ("did you go? how was it?").
  * Anything already past, or too soon after saving, is left out.
  */
 export function reminderTimes(
@@ -53,17 +53,34 @@ export function reminderTimes(
 ): Partial<Record<ReminderKind, number>> {
   if (!save.event_date) return {};
   const start = save.starts_at ? Date.parse(save.starts_at) : null;
-  const noon = localTime(save.event_date, 12, zone);
   const early = start !== null && start < localTime(save.event_date, 14, zone);
   const times: Partial<Record<ReminderKind, number>> = {
-    check_in: localTime(save.event_date, 18, zone, 2),
-    day_of: early ? localTime(save.event_date, 19, zone, 1) : noon,
+    check_in: localTime(save.event_date, 19, zone, 1),
     follow_up: localTime(save.event_date, 13, zone, -1),
   };
+  if (!early) times.day_of = localTime(save.event_date, 12, zone);
   for (const kind of Object.keys(times) as ReminderKind[]) {
     if (times[kind]! < now + MIN_LEAD_MS) delete times[kind];
   }
   return times;
+}
+
+/**
+ * The last moment a reminder is still worth sending, when the worker was down or a send failed:
+ * a check-in until the day of starts, a heads-up until the event does (6pm when the time isn't
+ * known), and a follow-up until two days after.
+ */
+export function reminderDeadline(
+  kind: ReminderKind,
+  save: Pick<SaveRow, "starts_at" | "event_date">,
+  zone: string,
+  sendAt: number,
+): number {
+  // Rows are only planned with a date, but a later save can clear it.
+  if (!save.event_date) return sendAt + 3 * HOUR;
+  if (kind === "check_in") return localTime(save.event_date, 0, zone);
+  if (kind === "day_of") return save.starts_at ? Date.parse(save.starts_at) : localTime(save.event_date, 18, zone);
+  return localTime(save.event_date, 0, zone, -3);
 }
 
 /**

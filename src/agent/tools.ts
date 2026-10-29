@@ -144,7 +144,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "save_event",
     description:
-      "Save an event so Haps remembers it. With remind: true, Haps also texts them before it: a check-in a couple of days out and a heads-up the day of. Pass its page url from search_events, or a link the user sent. Call it again with the same url to fill in the time or turn reminders on or off.",
+      "Save an event so Haps remembers it. With remind: true, Haps also texts them before it: a check-in the night before and a heads-up the day of. Pass its page url from search_events, or a link the user sent. Call it again with the same url to fill in the time or turn reminders on or off.",
     input_schema: {
       type: "object",
       properties: {

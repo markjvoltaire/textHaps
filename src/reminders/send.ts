@@ -4,18 +4,21 @@ import type { Profile, SaveRow } from "../db/types.ts";
 import { hasFeedback } from "../db/feedback.ts";
 import { appendAssistantTurn, getHistory } from "../memory/history.ts";
 import { formatError } from "../utils/text.ts";
-import { zoneFor, type ReminderKind } from "./schedule.ts";
+import { reminderDeadline, zoneFor, type ReminderKind } from "./schedule.ts";
 import { writeReminder } from "./write.ts";
 
 const POLL_MS = 60_000;
-/** A reminder this late (the worker was down) is about a moment that's gone, so it's dropped. */
-const STALE_MS = 3 * 3600_000;
+/** A claim this old is a worker that died mid-send, so another worker can take the reminder. */
+const LEASE_MS = 10 * 60_000;
+const MAX_ATTEMPTS = 3;
 
 type DueReminder = {
   id: string;
   kind: ReminderKind;
   send_at: string;
   space_id: string;
+  claimed_at: string | null;
+  attempts: number;
   profiles: Profile;
   saves: SaveRow;
 };
@@ -43,55 +46,96 @@ export function startReminders(platform: string, spaceFor: (id: string) => Promi
   return () => clearInterval(timer);
 }
 
+/** Gives up on a reminder for good, with the reason in the logs and on the row. */
+async function drop(reminder: DueReminder, reason: string): Promise<void> {
+  console.log(`[remind] drop id=${reminder.id} kind=${reminder.kind} attempts=${reminder.attempts}, ${reason}`);
+  const { error } = await getSupabase()
+    .from("reminders")
+    .update({ dropped_at: new Date().toISOString(), claimed_at: null, last_error: reason })
+    .eq("id", reminder.id);
+  if (error) console.error(`[remind] drop failed id=${reminder.id}: ${formatError(error)}`);
+}
+
 async function sendDue(platform: string, spaceFor: (id: string) => Promise<Space>): Promise<void> {
   const now = Date.now();
+  const leaseCutoff = new Date(now - LEASE_MS).toISOString();
   const { data, error } = await getSupabase()
     .from("reminders")
-    .select("id, kind, send_at, space_id, profiles(*), saves(*)")
+    .select("id, kind, send_at, space_id, claimed_at, attempts, profiles(*), saves(*)")
     .eq("platform", platform)
     .is("sent_at", null)
+    .is("dropped_at", null)
     .lte("send_at", new Date(now).toISOString())
+    .or(`claimed_at.is.null,claimed_at.lt."${leaseCutoff}"`)
     .order("send_at", { ascending: true })
     .limit(20);
   if (error) throw error;
 
   for (const reminder of (data ?? []) as unknown as DueReminder[]) {
     // Claimed before anything is sent: during a deploy both workers see it, and only one wins.
-    const { data: claimed, error: claimError } = await getSupabase()
+    // Matching the claim it was read with means a stale lease is taken over by one worker, not both.
+    let claim = getSupabase()
       .from("reminders")
-      .update({ sent_at: new Date().toISOString() })
+      .update({ claimed_at: new Date().toISOString() })
       .eq("id", reminder.id)
       .is("sent_at", null)
-      .select("id");
+      .is("dropped_at", null);
+    claim = reminder.claimed_at ? claim.eq("claimed_at", reminder.claimed_at) : claim.is("claimed_at", null);
+    const { data: claimed, error: claimError } = await claim.select("id");
     if (claimError) throw claimError;
     if (!claimed?.length) continue;
 
     const { profiles: profile, saves: save } = reminder;
-    const late = now - Date.parse(reminder.send_at);
-    // The follow-up is meant for after it, so only the reminders before it go stale when it starts.
-    const over = reminder.kind !== "follow_up" && save.starts_at ? Date.parse(save.starts_at) < now : false;
+    const zone = zoneFor(profile.city);
     if (reminder.kind === "follow_up" && (await hasFeedback(save.id))) {
-      console.log(`[remind] skip id=${reminder.id} kind=follow_up, they already said how it went`);
+      await drop(reminder, "they already said how it went");
       continue;
     }
-    if (late > STALE_MS || over) {
-      console.log(`[remind] skip id=${reminder.id} kind=${reminder.kind}, ${over ? "event started" : `${Math.round(late / 60_000)}m late`}`);
+    if (Date.now() > reminderDeadline(reminder.kind, save, zone, Date.parse(reminder.send_at))) {
+      await drop(reminder, "past its deadline");
       continue;
     }
+    if (reminder.attempts >= MAX_ATTEMPTS) {
+      await drop(reminder, "out of attempts");
+      continue;
+    }
+
+    let text = "";
+    let linesSent = 0;
     try {
-      const zone = zoneFor(profile.city);
       const history = await getHistory(profile.id);
-      const text = await writeReminder({ profile, save, kind: reminder.kind, zone, history });
+      text = await writeReminder({ profile, save, kind: reminder.kind, zone, history });
       const space = await spaceFor(reminder.space_id);
-      for (const line of text.split("\n")) await space.send(line);
-      console.log(`[remind] sent id=${reminder.id} kind=${reminder.kind} space=${reminder.space_id} text=${JSON.stringify(text)}`);
-      // In the thread, so their reply ("yeah still going") makes sense to Haps.
-      await appendAssistantTurn(profile.id, profile.platform_user_id, text).catch((err: unknown) =>
-        console.error(`[remind] history save failed id=${reminder.id}: ${formatError(err)}`),
-      );
+      for (const line of text.split("\n")) {
+        await space.send(line);
+        linesSent += 1;
+      }
     } catch (err) {
-      // Not retried: it's marked sent, and a second try could double-text them.
-      console.error(`[remind] send failed id=${reminder.id}: ${formatError(err)}`);
+      // Once any line went out, a retry would double-text them, so it counts as sent.
+      if (!linesSent) {
+        const attempts = reminder.attempts + 1;
+        console.error(`[remind] send failed id=${reminder.id} attempt=${attempts}: ${formatError(err)}`);
+        const { error: releaseError } = await getSupabase()
+          .from("reminders")
+          .update({ claimed_at: null, attempts, last_error: formatError(err).slice(0, 500) })
+          .eq("id", reminder.id);
+        // Left claimed, it's retried once the lease runs out.
+        if (releaseError) console.error(`[remind] release failed id=${reminder.id}: ${formatError(releaseError)}`);
+        continue;
+      }
+      console.error(`[remind] send broke after ${linesSent} line(s) id=${reminder.id}, not retrying: ${formatError(err)}`);
     }
+
+    // If this write fails, the lease keeps other workers off it for 10 minutes; that's the one double-text risk left.
+    const { error: sentError } = await getSupabase()
+      .from("reminders")
+      .update({ sent_at: new Date().toISOString(), claimed_at: null })
+      .eq("id", reminder.id);
+    if (sentError) console.error(`[remind] marking sent failed id=${reminder.id}: ${formatError(sentError)}`);
+    console.log(`[remind] sent id=${reminder.id} kind=${reminder.kind} space=${reminder.space_id} text=${JSON.stringify(text)}`);
+    // In the thread, so their reply ("yeah still going") makes sense to Haps.
+    await appendAssistantTurn(profile.id, profile.platform_user_id, text).catch((err: unknown) =>
+      console.error(`[remind] history save failed id=${reminder.id}: ${formatError(err)}`),
+    );
   }
 }
