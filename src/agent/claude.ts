@@ -302,6 +302,7 @@ export async function generateReply(input: {
     userMessage: input.userMessage,
     eventReads: new Map(),
     linkRecReads: 0,
+    lovedSaved: new Set(),
     pageText: "",
     storedText: bareLinks(stored).join("\n"),
     tasteChanged: false,

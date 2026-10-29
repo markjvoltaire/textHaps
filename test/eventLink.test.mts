@@ -38,6 +38,7 @@ const session = (userMessage: string, history = "") => ({
   userMessage,
   eventReads: new Map<string, Promise<any>>(),
   linkRecReads: 0,
+  lovedSaved: new Set(),
   pageText: "",
   storedText: "",
   untrusted: false,

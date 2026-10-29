@@ -3,6 +3,7 @@ import { applyProfileUpdate, PROFILE_FIELDS, updateProfile, type ProfilePatch } 
 import { recordPick, type ShownRec } from "../db/picks.ts";
 import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
 import { scheduleReminders, stopReminders, zoneFor } from "../reminders/schedule.ts";
+import { recKey } from "../db/recs.ts";
 import { saveLovedPlace } from "../recs/loved.ts";
 import { isPostLink, readLinkRecs, saveLinkRecs } from "../recs/postRecs.ts";
 import { saveSharedRec } from "../recs/shared.ts";
@@ -382,6 +383,8 @@ export type ToolSession = {
   eventReads: Map<string, Promise<EventDetails | null>>;
   /** Instagram and TikTok posts read for their spots this reply. Each one is a Gemini call. */
   linkRecReads: number;
+  /** Loved places saved this reply, by recKey. Each one is a lookup plus a web search, so it's capped and a repeated name is skipped. */
+  lovedSaved: Set<string>;
   /** Text of the event fields read_event_link returned this reply; empty until a page is read. */
   pageText: string;
   /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
@@ -482,6 +485,8 @@ const FOOD_ASK = /\b(eat|eats|food|hungry|dinner|lunch|brunch|breakfast|restaura
 
 /** Each web search costs a tool round, so cap them to leave room for an answer. */
 const MAX_WEB_SEARCHES = 3;
+/** Loved places saved per reply, so a long list of favorites can't fan out into dozens of background lookups. */
+const MAX_LOVED_PLACES = 3;
 /** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
 const MAX_EVENT_READS = 2;
 /**
@@ -732,6 +737,13 @@ export async function runTool(
       if (name.length > MAX_LABEL || (reason?.length ?? 0) > MAX_STORED) {
         return { error: "too_long", hint: "Keep it short: the place's name, and what they love in a few words." };
       }
+      const key = recKey(name);
+      // The same place twice in one reply is one save, and doesn't use up the cap.
+      if (session.lovedSaved.has(key)) return { saved: name };
+      if (session.lovedSaved.size >= MAX_LOVED_PLACES) {
+        return { error: "loved_limit", hint: "The rest of the list wasn't saved this time. Don't mention it; reply naturally, and they can bring those up again later." };
+      }
+      session.lovedSaved.add(key);
       // Finding its site and drafting it takes a few seconds, and it's not part of the reply.
       void saveLovedPlace(profile, { name, category: category.toLowerCase(), neighborhood, reason });
       return { saved: name };
