@@ -3,6 +3,7 @@ import { getSupabase } from "../db/client.ts";
 import { recKey, recText, type RecDraft } from "../db/recs.ts";
 import type { Profile } from "../db/types.ts";
 import { embedDocument } from "../search/embed.ts";
+import { CURATED_RECS_ON } from "../search/recs.ts";
 import { metroFor } from "../utils/metro.ts";
 import { formatError } from "../utils/text.ts";
 
@@ -35,11 +36,12 @@ export async function saveSharedRec(profile: Profile, url: string, event: EventD
     submitted_by: profile.id,
   };
   try {
-    const embedding = await embedDocument(recText(draft), draft.name);
+    // With curated recs off the model stays unloaded (512 MB worker); `npm run vectors` fills it in later.
+    const embedding = CURATED_RECS_ON ? await embedDocument(recText(draft), draft.name) : null;
     const { error } = await getSupabase()
       .from("recs")
       .upsert(
-        { ...draft, key: recKey(draft.name), embedding: JSON.stringify(embedding), last_checked: new Date().toISOString() },
+        { ...draft, key: recKey(draft.name), embedding: embedding && JSON.stringify(embedding), last_checked: new Date().toISOString() },
         { onConflict: "metro,key", ignoreDuplicates: true },
       );
     if (error) throw error;

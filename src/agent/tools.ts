@@ -13,7 +13,7 @@ import { TASTE_CATEGORIES, type Profile, type TasteCategory, type TasteKind, typ
 import { searchEventPages, searchWeb, type WebResult } from "../search/exa.ts";
 import { ensureRecSite } from "../recs/link.ts";
 import { searchTikTokVideos } from "../search/monid.ts";
-import { NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
+import { CURATED_RECS_ON, NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
 import { refreshTasteEmbedding, tasteVector } from "../search/taste.ts";
 import { knownMetro, metroFor } from "../utils/metro.ts";
 import { cleanStart, describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
@@ -395,9 +395,12 @@ async function currentTaste(profile: Profile, session: ToolSession): Promise<num
   return tasteVector(profile);
 }
 
-/** Rebuilds the taste vector once per change, not once per saved taste. */
+/**
+ * Rebuilds the taste vector once per change, not once per saved taste. Skipped with curated recs off,
+ * since embedding loads the ~400 MB model that switch keeps out of a small worker.
+ */
 export async function refreshTasteIfChanged(profile: Profile, session: ToolSession): Promise<void> {
-  if (!session.tasteChanged) return;
+  if (!session.tasteChanged || !CURATED_RECS_ON) return;
   session.tasteChanged = false;
   await refreshTasteEmbedding(profile, await listTaste(profile.id));
 }
