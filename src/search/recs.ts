@@ -9,11 +9,8 @@ import { withTaste } from "./taste.ts";
  */
 export const CURATED_RECS_ON = process.env.CURATED_RECS !== "off" && process.env.RECS_SEARCH !== "off";
 
-/** Metros with an approved recs list. Search there comes from the recs, not the live web. */
+/** Metros with an approved recs list. Search there comes from the recs, with the live web as the fallback. */
 export const RECS_METROS = new Set(CURATED_RECS_ON ? ["miami", "la"] : []);
-
-/** Recs that are nights out, for search_events. Everything else is a place for find_places. */
-export const NIGHT_CATEGORIES = ["party", "club", "gay club", "live music", "listening bar", "lounge"];
 
 export type RecResult = Pick<
   RecRow,

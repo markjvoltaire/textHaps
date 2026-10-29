@@ -28,3 +28,6 @@ services:
         sync: false
       - key: MONID_API_KEY
         sync: false
+      # Gemini watches Instagram reels (video and audio) to save the spots in them.
+      - key: GEMINI_API_KEY
+        sync: false

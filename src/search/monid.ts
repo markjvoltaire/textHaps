@@ -108,6 +108,9 @@ type RawInstagramPost = {
   comments?: number;
   locationName?: string | null;
   isAd?: boolean;
+  videoUrl?: string | null;
+  displayUrl?: string | null;
+  durationSeconds?: number | null;
 };
 
 /**
@@ -144,23 +147,88 @@ export type InstagramPostPage = {
   posted: string;
   caption: string;
   location: string | null;
+  /** The video file on Instagram's CDN, for a reel or video post. It plays without a login for a while. */
+  videoUrl: string | null;
+  /** The post's image (a carousel's first one), or a video's cover. */
+  imageUrl: string | null;
+  durationSeconds: number | null;
 };
 
 /** An Instagram post or reel link, the kind instagram.post can read. Profile links name no post. */
 export const INSTAGRAM_POST = /^https?:\/\/(?:www\.)?instagram\.com\/(?:[A-Za-z0-9_.]+\/)?(?:p|reel|reels|tv)\/[A-Za-z0-9_-]+\/?(?:[?#].*)?$/i;
 
-/** One Instagram post by its link, or null when it has no caption to read. Instagram walls off the page itself. */
+/** One Instagram post by its link, or null when it has neither a caption nor a video to read. Instagram walls off the page itself. */
 export async function instagramPost(url: string, deadlineMs = 8000): Promise<InstagramPostPage | null> {
   // chameleon is the fastest route that stays up (~1.3s median).
   const data = await runMonid<RawInstagramPost & { owner?: string; displayName?: string | null }>("/instagram.post", { url, route: "chameleon" }, deadlineMs);
   const caption = data?.caption?.trim() ?? "";
-  if (!caption) return null;
+  const videoUrl = data?.videoUrl?.trim() || null;
+  if (!caption && !videoUrl) return null;
   return {
     author: data?.owner ?? "",
     name: data?.displayName?.trim() ?? "",
     posted: new Date((data?.createdUtc ?? 0) * 1000).toISOString().slice(0, 10),
     caption,
     location: data?.locationName ?? null,
+    videoUrl,
+    imageUrl: data?.displayUrl?.trim() || null,
+    durationSeconds: data?.durationSeconds ?? null,
+  };
+}
+
+/** A TikTok video or slideshow link: the full one, or a vm.tiktok.com / tiktok.com/t/ share link. */
+export const TIKTOK_POST = /^https?:\/\/(?:(?:www|m)\.)?tiktok\.com\/(?:@[A-Za-z0-9_.]+\/(?:video|photo)\/\d+|t\/[A-Za-z0-9]+)\/?(?:[?#].*)?$|^https?:\/\/(?:vm|vt)\.tiktok\.com\/[A-Za-z0-9]+\/?(?:[?#].*)?$/i;
+
+// A slideshow can run 20+ images; the first ten carry a list post.
+const MAX_SLIDES = 10;
+
+export type TikTokPostPage = {
+  author: string;
+  name: string;
+  posted: string;
+  caption: string;
+  /** The standard-definition MP4, a third the size of the original and plenty to read. */
+  videoUrl: string | null;
+  /** A slideshow's images in order. Empty for a video. */
+  imageUrls: string[];
+  durationSeconds: number | null;
+};
+
+type RawTikTokPost = {
+  authorHandle?: string;
+  authorName?: string | null;
+  caption?: string | null;
+  createdUtc?: number;
+  durationSeconds?: number | null;
+  videoUrl?: string | null;
+  sdVideoUrl?: string | null;
+  images?: { image?: string; watermarkedImage?: string }[];
+};
+
+/**
+ * One TikTok post by its link. A video comes from tiktok.video_download; a slideshow has no video
+ * file, so its images come from tiktok.photos. Null when neither has anything to read.
+ */
+export async function tiktokPost(url: string, deadlineMs = 10000): Promise<TikTokPostPage | null> {
+  // bison is the cheapest route that stays up (~0.8s median).
+  let data = await runMonid<RawTikTokPost>("/tiktok.video_download", { url, route: "bison" }, deadlineMs).catch(() => undefined);
+  const videoUrl = data?.sdVideoUrl?.trim() || data?.videoUrl?.trim() || null;
+  let imageUrls: string[] = [];
+  if (!videoUrl) {
+    data = await runMonid<RawTikTokPost>("/tiktok.photos", { url, route: "tiger" }, deadlineMs);
+    // The watermarked copies are webp; the clean ones are HEIC, which not every reader takes.
+    imageUrls = (data?.images ?? []).flatMap((image) => image.watermarkedImage || image.image || []).slice(0, MAX_SLIDES);
+  }
+  const caption = data?.caption?.trim() ?? "";
+  if (!data || (!videoUrl && !imageUrls.length)) return null;
+  return {
+    author: data.authorHandle ?? "",
+    name: data.authorName?.trim() ?? "",
+    posted: new Date((data.createdUtc ?? 0) * 1000).toISOString().slice(0, 10),
+    caption,
+    videoUrl,
+    imageUrls,
+    durationSeconds: data.durationSeconds ?? null,
   };
 }
 

@@ -2,7 +2,9 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { applyProfileUpdate, PROFILE_FIELDS, updateProfile, type ProfilePatch } from "../db/profiles.ts";
 import { recordPick, type ShownRec } from "../db/picks.ts";
 import { listSaves, removeSave, saveEvent } from "../db/saves.ts";
-import { scheduleReminders, zoneFor } from "../reminders/schedule.ts";
+import { scheduleReminders, stopReminders, zoneFor } from "../reminders/schedule.ts";
+import { saveLovedPlace } from "../recs/loved.ts";
+import { isPostLink, readLinkRecs, saveLinkRecs } from "../recs/postRecs.ts";
 import { saveSharedRec } from "../recs/shared.ts";
 import { verifyFlyerEvent } from "../recs/verify.ts";
 import { lovedBySimilar, recordFeedback, VERDICTS } from "../db/feedback.ts";
@@ -10,10 +12,9 @@ import { PROVIDER } from "../utils/provider.ts";
 import { formatError } from "../utils/text.ts";
 import { forgetTaste, listTaste, rememberTaste } from "../db/taste.ts";
 import { TASTE_CATEGORIES, type Profile, type TasteCategory, type TasteKind, type TasteSource } from "../db/types.ts";
-import { searchEventPages, searchWeb, type WebResult } from "../search/exa.ts";
+import { searchWeb, type WebResult } from "../search/exa.ts";
 import { ensureRecSite } from "../recs/link.ts";
-import { searchTikTokVideos } from "../search/monid.ts";
-import { CURATED_RECS_ON, NIGHT_CATEGORIES, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
+import { CURATED_RECS_ON, RECS_METROS, searchRecs, type RecResult } from "../search/recs.ts";
 import { refreshTasteEmbedding, tasteVector } from "../search/taste.ts";
 import { knownMetro, metroFor } from "../utils/metro.ts";
 import { cleanStart, describeWhen, eventLinksIn, readEventPage, type EventDetails } from "./eventLink.ts";
@@ -23,7 +24,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "find_places",
     description:
-      "Search the web for places that aren't parties: wine bars, bars, restaurants, cafes, brunch, run clubs. Never use it for parties or club nights. Recommend only places the results back up, and don't make up hours or details.",
+      "Find places that aren't parties: wine bars, bars, restaurants, cafes, brunch, run clubs. In cities Haps has recs for, this searches Haps's own recs first and only goes to the live web when none come back or you pass live: true. Never use it for parties or club nights. Recommend only places the results back up, and don't make up hours or details.",
     input_schema: {
       type: "object",
       properties: {
@@ -44,7 +45,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         },
         live: {
           type: "boolean",
-          description: "Search the live web instead of Haps's recs. Only after the recs came back with nothing near them or in their budget.",
+          description: "Search the live web instead of Haps's recs. Only after the recs came back and none fit what they asked, or none are near them or in their budget.",
         },
       },
       required: ["query", "purpose"],
@@ -54,7 +55,7 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
   {
     name: "read_event_link",
     description:
-      "Read an event page the user just sent (Posh, Partiful, Eventbrite, DICE, RA, Instagram, etc.) and get its title, time, and place. Only works on a link in their current message. If it comes back unreadable, ask them for the day, time, and place.",
+      "Read an event page the user just sent (Partiful, Eventbrite, DICE, RA, Instagram, etc.) and get its title, time, and place. Only works on a link in their current message. If it comes back unreadable, ask them for the day, time, and place.",
     input_schema: {
       type: "object",
       properties: {
@@ -65,9 +66,22 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "save_link_recs",
+    description:
+      "Save every place and event in an Instagram or TikTok post they sent (a video, reel, or slideshow), when they ask you to save them (\"save these\", \"add these spots\"). Haps watches the video and listens to it (or looks through the slides), saves each spot to their saves, and adds them to Haps's recs. Takes up to half a minute. Only works on an Instagram or TikTok link in their current message.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The Instagram or TikTok link, exactly as they sent it" },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "search_events",
     description:
-      "Search ticketing sites (DICE, Posh, Partiful, Eventbrite, RA, Shotgun, Luma) and recent TikTok promo videos live for nights in this city. Recommend only events these pages back up, with the date the page shows. Do not invent events. Do not call until you know their city, the vibe they want, and their budget: ask first if you don't.",
+      "Find nights out in this city. In cities Haps has recs for, this searches Haps's own recs: every kind of spot, from parties and live music to rooftops, dive bars, and dinner. It only goes to the live web when none come back or you pass live: true. Recommend only what the results back up, with the date or schedule they show. Do not invent events. Do not call until you know their city, the vibe they want, and their budget: ask first if you don't.",
     input_schema: {
       type: "object",
       required: ["vibe", "budget"],
@@ -90,6 +104,10 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         },
         from: { type: "string", description: "ISO start of the window. Defaults to now. Set it when they ask about a specific day or weekend." },
         to: { type: "string", description: "ISO end of the window. Defaults to 21 days out. For 'this weekend' use the coming Sunday night." },
+        live: {
+          type: "boolean",
+          description: "Search the live web instead of Haps's recs. Only after the recs came back and none fit what they asked, like a dated pop-up or a specific show.",
+        },
       },
       additionalProperties: false,
     },
@@ -129,6 +147,22 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "save_loved_place",
+    description:
+      "When they name a specific real spot they love (a bar, restaurant, club, cafe, by its name), save it so Haps can send others there too. Call it alongside remember_taste for the place. Not for a kind of place (\"dive bars\", \"some spot in brickell\"), a private home, or anywhere they didn't say they love.",
+    input_schema: {
+      type: "object",
+      required: ["name", "category"],
+      properties: {
+        name: { type: "string", description: "The place's name as they said it, e.g. Gramps" },
+        category: { type: "string", description: "What kind of spot, e.g. restaurant, cocktail bar, dive bar, club, cafe, live music" },
+        neighborhood: { type: "string", description: "Where it is, if they said, e.g. wynwood" },
+        reason: { type: "string", description: "What they love about it, short and in their words, e.g. the backyard on a sunday" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "forget_taste",
     description:
       "Remove a saved taste the user has moved on from, e.g. they're over techno or don't care about wine bars anymore. Use the label as it appears under Known taste. If they name something new instead, also call remember_taste for it.",
@@ -158,7 +192,8 @@ export const HAPS_TOOLS: Anthropic.Tool[] = [
         venue: { type: "string", description: "Where it is, e.g. Tomorrowland Miami" },
         remind: {
           type: "boolean",
-          description: "true once they say yes to you texting them before it, false if they say no. Leave it out otherwise",
+          description:
+            "true for an event they sent you (a link, flyer, or screenshot), or once they say yes to reminders for one you recommended. false when they say stop or no. Leave it out otherwise",
         },
         note: { type: "string" },
       },
@@ -345,6 +380,8 @@ export type ToolSession = {
   userMessage: string;
   /** Event pages read this reply, by normalized url, so the same link is read once and reads stay capped. */
   eventReads: Map<string, Promise<EventDetails | null>>;
+  /** Instagram and TikTok posts read for their spots this reply. Each one is a Gemini call. */
+  linkRecReads: number;
   /** Text of the event fields read_event_link returned this reply; empty until a page is read. */
   pageText: string;
   /** Bare links (like "lofi.fm") from stored taste and saves, the user's own data. */
@@ -396,7 +433,7 @@ async function currentTaste(profile: Profile, session: ToolSession): Promise<num
 }
 
 /**
- * Rebuilds the taste vector once per change, not once per saved taste. Skipped with curated recs off,
+ * Rebuilds the taste vector once per change, not once per saved taste. Skipped with recs search off,
  * since embedding loads the ~400 MB model that switch keeps out of a small worker.
  */
 export async function refreshTasteIfChanged(profile: Profile, session: ToolSession): Promise<void> {
@@ -447,10 +484,6 @@ const FOOD_ASK = /\b(eat|eats|food|hungry|dinner|lunch|brunch|breakfast|restaura
 const MAX_WEB_SEARCHES = 3;
 /** Links read per reply. The message is already capped at 2 links, this holds even if the model retries. */
 const MAX_EVENT_READS = 2;
-/** Profile values and taste evidence are re-sent in the prompt on every reply, so they're kept short. */
-const MAX_STORED = 200;
-const MAX_LABEL = 80;
-
 /**
  * One line per search saying where the answer came from: Haps's curated recs database or the live web
  * through Exa. The tool result carries the same source, so Langfuse traces show it too.
@@ -458,6 +491,10 @@ const MAX_LABEL = 80;
 function logSearch(tool: string, source: "curated" | "exa", query: string, metro: string | null, results: number): void {
   console.log(`[search] tool=${tool} source=${source} metro=${metro ?? "none"} results=${results} query=${JSON.stringify(query)}`);
 }
+
+/** Profile values and taste evidence are re-sent in the prompt on every reply, so they're kept short. */
+const MAX_STORED = 200;
+const MAX_LABEL = 80;
 
 export async function runTool(
   profile: Profile,
@@ -485,10 +522,14 @@ export async function runTool(
         return { error: "search_limit", hint: "No more searches this reply. Answer with what you already found." };
       }
       session.webSearches += 1;
-      // A city with a recs list is searched from it. A search naming another city still goes to the web.
+      // Recs come from Haps's own list in a city that has one, and Exa is the fallback. A search
+      // naming another city, or a look-up of a place they named (hours, menu), goes to the web.
       const metro = knownMetro(query) ?? (profile.city ? metroFor(profile.city) : null);
-      if (metro && RECS_METROS.has(metro) && input.live !== true) {
-        const recs = await searchRecs(query, metro, { taste: await currentTaste(profile, session) });
+      const recs =
+        metro && RECS_METROS.has(metro) && input.purpose !== "look_up" && input.live !== true
+          ? await searchRecs(query, metro, { taste: await currentTaste(profile, session) })
+          : [];
+      if (recs.length) {
         keepRecLinks(recs, session);
         logSearch("find_places", "curated", query, metro, recs.length);
         return {
@@ -560,7 +601,37 @@ export async function runTool(
           price_note: event.price_note,
           age: event.age,
         },
-        hint: `In this same reply: tell them what it is, when, and where, call save_event (the url they sent, title, venue, starts_at ${event.starts_at}), and ask if they want you to remind them before it.${when.timeKnown ? " Mention the age limit if there is one." : " The page had no start time, so ask what time it starts too. When they say, save it again with the full time."}`,
+        hint: `In this same reply: tell them what it is, when, and where, call save_event (the url they sent, title, venue, starts_at ${event.starts_at}, remind: true), and tell them you'll hit them before it, with an easy out.${when.timeKnown ? " Mention the age limit if there is one." : " The page had no start time, so ask what time it starts too. When they say, save it again with the full time."}`,
+      };
+    }
+    case "save_link_recs": {
+      const url = asString(input.url);
+      if (!url) return { error: "url is required" };
+      // Only a link they sent right now, read as they spelled it, so a page or old chat can't point this anywhere.
+      const sent = eventLinksIn(session.userMessage).find((link) => isExactLink(url, [link]));
+      if (!sent || !isPostLink(sent)) {
+        return { error: "not_post_link", hint: "This only reads an Instagram or TikTok post link in their latest message. For other links use read_event_link." };
+      }
+      if (session.linkRecReads >= 1) return { error: "read_limit", hint: "One post per reply. Ask them to send the next one after." };
+      session.linkRecReads += 1;
+      session.untrusted = true;
+      const read = await readLinkRecs(sent).catch((err: unknown) => {
+        console.warn(`[link-recs] read failed ${sent}: ${formatError(err)}`);
+        return null;
+      });
+      if (!read) return { error: "unreadable", hint: "Say you couldn't open that one and ask them for a screenshot or the names." };
+      if (!read.recs.length) return { error: "nothing_found", what_it_is: read.summary, hint: "Say what the post is and that you didn't see any spots in it to save." };
+      const saved = await saveLinkRecs(profile, sent, read.recs);
+      // Names and details came off a stranger's post, so remember_taste and the like can't take them as theirs.
+      session.pageText += `\n${saved.map((rec) => `${rec.name}\n${rec.why}`).join("\n")}`;
+      return {
+        untrusted_post_content: {
+          what_it_is: read.summary,
+          saved: saved.map((rec) => ({ name: rec.name, kind: rec.kind, category: rec.category, neighborhood: rec.neighborhood, why: rec.why, when: rec.schedule })),
+        },
+        hint: saved.length
+          ? "Tell them what you saved in one or two short lines: the names, with a word on one or two if it helps. Don't list every detail."
+          : "Saving failed. Say something glitched and ask them to send it again.",
       };
     }
     case "search_events": {
@@ -590,8 +661,11 @@ export async function runTool(
       const tags = asStringArray(input.tags);
       const vibe = [asString(input.query), asString(input.vibe), ...(tags ?? [])].filter(Boolean).join(" ") || "party";
       const metro = metroFor(city);
-      if (RECS_METROS.has(metro)) {
-        const recs = await searchRecs(vibe, metro, { categories: NIGHT_CATEGORIES, taste: await currentTaste(profile, session) });
+      // Every kind of rec, not just clubs: a good night can be a rooftop, a dive bar, or dinner. The
+      // live search is the fallback, for when the recs have nothing or none fit.
+      const recs =
+        RECS_METROS.has(metro) && input.live !== true ? await searchRecs(vibe, metro, { taste: await currentTaste(profile, session) }) : [];
+      if (recs.length) {
         keepRecLinks(recs, session);
         session.eventPages.push(...recs.flatMap((rec) => (rec.url ? [{ title: rec.name, url: rec.url }] : [])));
         logSearch("search_events", "curated", vibe, metro, recs.length);
@@ -601,33 +675,24 @@ export async function runTool(
           count: recs.length,
           haps_recs: forClaude(recs),
           ...similar,
-          hint: "These are recurring nights and venues from Haps's own vetted list, closest match first, not dated listings. Recommend only the ones that fit, and give when as the schedule says it (e.g. saturdays). Never make up a date, a lineup, or say it's on tonight unless the schedule shows that day. If there's no schedule, say it's a spot to check, not that something is on. For one rec that has a url, end with that url alone on the last line.",
+          hint: "These are recurring nights and venues from Haps's own vetted list, closest match first, not dated listings. Recommend only the ones that fit, and give when as the schedule says it (e.g. saturdays). Never make up a date, a lineup, or say it's on tonight unless the schedule shows that day. If there's no schedule, say it's a spot to check, not that something is on. If none fit what they asked, call search_events again with live: true instead of sending one that doesn't. For one rec that has a url, end with that url alone on the last line.",
         };
       }
       // Titles and venues are scraped from organizers, so they can carry links too.
       session.untrusted = true;
-      // Live from ticketing sites outside the recs metros.
-      // TikTok is extra: if Monid is down or slow, answer from the ticketing pages alone.
-      const [pages, videos] = await Promise.all([
-        searchEventPages(`${vibe} events in ${city} ${windowWords(asString(input.from), asString(input.to))}`),
-        searchTikTokVideos(`${vibe} ${city}`).catch((err: unknown) => {
-          console.warn(`[tiktok] search failed: ${err instanceof Error ? err.message : String(err)}`);
-          return [];
-        }),
-      ]);
-      // Event pages and videos can be sent as links or saved, so they count as found by a search.
+      // Live from Exa: outside the recs metros, or when the recs had nothing that fit.
+      const pages = await searchWeb(`${vibe} events in ${city} ${windowWords(asString(input.from), asString(input.to))}`);
+      // Event pages can be sent as links or saved, so they count as found by a search.
       for (const page of pages) session.webUrls.add(page.url);
-      for (const video of videos) session.webUrls.add(video.url);
       session.eventPages.push(...pages.map((page) => ({ title: page.title, url: page.url })));
-      logSearch("search_events", "exa", vibe, metro, pages.length + videos.length);
+      logSearch("search_events", "exa", vibe, metro, pages.length);
       const similar = await similarFor(profile, session, metro);
       return {
         source: "exa",
-        count: pages.length + videos.length,
+        count: pages.length,
         untrusted_event_pages: pages,
-        untrusted_tiktok_videos: videos,
         ...similar,
-        hint: "Event pages are ticketing listings. TikTok videos are recent promo clips and weekend guides, and many are for other cities, past nights, or not nights out at all, so skip those. Only recommend ones that show a date inside the window they asked about and a place in or near their city, and give the day and time as shown. Skip any without a clear date. For one event, end with its page or video url alone on the last line.",
+        hint: "These are web pages, and many are for other cities, past nights, or not nights out at all, so skip those. Only recommend ones that show a date inside the window they asked about and a place in or near their city, and give the day and time as shown. Skip any without a clear date. For one event, end with its page url alone on the last line.",
       };
     }
     case "remember_taste": {
@@ -654,6 +719,22 @@ export async function runTool(
       });
       session.tasteChanged = true;
       return { saved: { kind: signal.kind, label: signal.label, category: signal.category, source: signal.source, confidence: signal.confidence } };
+    }
+    case "save_loved_place": {
+      const name = asString(input.name);
+      const category = asString(input.category);
+      if (!name || !category) return { error: "name and category are required" };
+      const reason = asString(input.reason) ?? null;
+      const neighborhood = asString(input.neighborhood) ?? null;
+      if ([name, category, reason ?? "", neighborhood ?? ""].some((value) => plantedByPage(value, session) || (session.untrusted && hasLink(value)))) {
+        return { error: "not_from_user", hint: "Only save places the user named themselves, with no links." };
+      }
+      if (name.length > MAX_LABEL || (reason?.length ?? 0) > MAX_STORED) {
+        return { error: "too_long", hint: "Keep it short: the place's name, and what they love in a few words." };
+      }
+      // Finding its site and drafting it takes a few seconds, and it's not part of the reply.
+      void saveLovedPlace(profile, { name, category: category.toLowerCase(), neighborhood, reason });
+      return { saved: name };
     }
     case "forget_taste": {
       const label = asString(input.label);
@@ -686,6 +767,17 @@ export async function runTool(
       const start = startsAt ? cleanStart(startsAt) : null;
       if (startsAt && !start) {
         return { error: "bad_starts_at", hint: "starts_at must look like 2026-11-14T22:00:00-05:00, or 2026-11-14 when the time isn't known." };
+      }
+      // "Stop" turns off the save it's about, found loosely, instead of starting a new save that leaves
+      // the old one's texts on.
+      if (input.remind === false) {
+        const stopped = await stopReminders(profile.id, {
+          url: url ?? null,
+          title: asString(input.title) ?? null,
+          venue: asString(input.venue) ?? null,
+          event_date: start?.slice(0, 10) ?? null,
+        });
+        if (stopped.length) return { reminders_off: stopped.map((save) => save.title ?? save.url), texts_planned: [] };
       }
       const saved = await saveEvent({
         profileId: profile.id,
@@ -777,11 +869,10 @@ export async function runTool(
       if (Object.keys(patch).length === 0) {
         return { error: "nothing_to_update" };
       }
-      // Every value is re-sent in the prompt on every reply, so a pasted rant stays out.
+      // Every value is re-sent in the prompt on every reply, so a pasted rant or a planted link stays out.
       if (Object.values(patch).some((value) => value.length > MAX_STORED)) {
         return { error: "too_long", hint: "Keep it short, in their words: one short line per field." };
       }
-      // A planted link saved here would come back in every later prompt.
       if (session.untrusted && Object.entries(patch).some(([field, value]) => field !== "email" && hasLink(value))) {
         return { error: "link_in_profile", hint: "Profile fields are short words, not links." };
       }

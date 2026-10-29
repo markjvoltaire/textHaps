@@ -120,8 +120,15 @@ export async function scheduleReminders(
   save: SaveRow,
   where: { platform: string; spaceId: string; zone: string },
 ): Promise<Partial<Record<ReminderKind, number>>> {
-  const times = save.remind ? reminderTimes(save, where.zone) : {};
+  let times = save.remind ? reminderTimes(save, where.zone) : {};
   const supabase = getSupabase();
+  // The same event can come in twice as different saves (the link and then the flyer, or "MOVE" and
+  // "MOVE at tomorrowland"). Only one of them texts; the other reports the times already planned.
+  const twin = Object.keys(times).length ? await reminderTwin(save) : null;
+  if (twin) {
+    times = {};
+    console.log(`[remind] save=${save.id} is the same event as save=${twin.saveId}, not scheduling twice`);
+  }
   const { error: dropError } = await supabase.from("reminders").delete().eq("save_id", save.id).is("sent_at", null);
   if (dropError) throw dropError;
   const rows = (Object.entries(times) as [ReminderKind, number][]).map(([kind, at]) => ({
@@ -137,5 +144,87 @@ export async function scheduleReminders(
     const { error } = await supabase.from("reminders").upsert(rows, { onConflict: "save_id,kind", ignoreDuplicates: true });
     if (error) throw error;
   }
-  return times;
+  return twin?.times ?? times;
+}
+
+const FILLER = new Set(["a", "an", "the", "at", "and", "in", "on", "of", "presents", "x"]);
+
+/** Its words without filler or punctuation, so "MOVE @ Tomorrowland!" and "move at the tomorrowland" compare. */
+function words(text: string | null): string[] {
+  return (text ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word && !FILLER.has(word));
+}
+
+/**
+ * Two titles name the same event when every word of the shorter is a whole word of the longer, so
+ * "MOVE" matches "MOVE @ Tomorrowland" but not "MOVEMENT", and the shorter is more than a fragment.
+ */
+export function sameEventTitle(a: string | null, b: string | null): boolean {
+  const [x, y] = [words(a), words(b)];
+  const [shorter, longer] = x.length <= y.length ? [x, new Set(y)] : [y, new Set(x)];
+  return shorter.join("").length >= 4 && shorter.every((word) => longer.has(word));
+}
+
+type EventFields = Pick<SaveRow, "title" | "url" | "venue">;
+
+/**
+ * Two saves are the same event: the same link, or titles that match. Two different links, or two
+ * venues with no word in common, are two events even when the titles match ("Halloween" at Gramps
+ * and "Halloween Ball" at Space on the same night).
+ */
+export function sameEvent(a: EventFields, b: EventFields): boolean {
+  if (a.url && b.url) return a.url === b.url;
+  if (a.venue && b.venue) {
+    const venue = new Set(words(a.venue));
+    if (!words(b.venue).some((word) => venue.has(word))) return false;
+  }
+  return sameEventTitle(a.title, b.title);
+}
+
+/** Another save of theirs for the same event on the same day that already has reminders waiting, if any. */
+async function reminderTwin(save: SaveRow): Promise<{ saveId: string; times: Partial<Record<ReminderKind, number>> } | null> {
+  const { data, error } = await getSupabase()
+    .from("reminders")
+    .select("kind, send_at, saves!inner(id, title, url, venue, event_date)")
+    .eq("profile_id", save.profile_id)
+    .neq("save_id", save.id)
+    .is("sent_at", null)
+    .is("dropped_at", null)
+    .eq("saves.event_date", save.event_date!);
+  if (error) throw error;
+  const rows = (data ?? []) as unknown as { kind: ReminderKind; send_at: string; saves: Pick<SaveRow, "id" | "title" | "url" | "venue" | "event_date"> }[];
+  const match = rows.find((row) => sameEvent(row.saves, save));
+  if (!match) return null;
+  const times = Object.fromEntries(
+    rows.filter((row) => row.saves.id === match.saves.id).map((row) => [row.kind, Date.parse(row.send_at)]),
+  ) as Partial<Record<ReminderKind, number>>;
+  return { saveId: match.saves.id, times };
+}
+
+/**
+ * Turns reminders off for every save of theirs that is this event, and drops what's still waiting
+ * to go out. "Stop" names the event loosely ("MOVE" for the flyer saved as "MOVE @ Tomorrowland"),
+ * so an exact-title lookup alone would miss it and they'd still get texted. Returns the saves it
+ * turned off.
+ */
+export async function stopReminders(
+  profileId: string,
+  event: EventFields & Pick<SaveRow, "event_date">,
+): Promise<SaveRow[]> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase.from("saves").select("*").eq("profile_id", profileId).eq("remind", true);
+  if (error) throw error;
+  const matches = ((data ?? []) as SaveRow[]).filter(
+    (save) => sameEvent(save, event) && (!event.event_date || !save.event_date || save.event_date === event.event_date),
+  );
+  if (!matches.length) return [];
+  const ids = matches.map((save) => save.id);
+  const { error: offError } = await supabase.from("saves").update({ remind: false }).eq("profile_id", profileId).in("id", ids);
+  if (offError) throw offError;
+  const { error: dropError } = await supabase.from("reminders").delete().eq("profile_id", profileId).in("save_id", ids).is("sent_at", null);
+  if (dropError) throw dropError;
+  console.log(`[remind] stopped profile=${profileId} saves=${ids.join(",")}`);
+  return matches;
 }

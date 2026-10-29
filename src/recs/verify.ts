@@ -54,6 +54,12 @@ export async function verifyFlyerEvent(profile: Profile, save: SaveRow): Promise
       price_note: null,
       age: null,
       summary: null,
+      category: null,
+      neighborhood: null,
+      vibe: null,
+      music: null,
+      crowd: null,
+      best_for: [],
     });
     return url;
   } catch (err) {

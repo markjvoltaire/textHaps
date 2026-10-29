@@ -63,6 +63,26 @@ export async function saveEvent(input: SaveInput): Promise<SaveRow> {
   return data as SaveRow;
 }
 
+/** Their most recent save with this title, whatever its link. */
+export async function findSaveByTitle(profileId: string, title: string): Promise<SaveRow | null> {
+  const { data, error } = await getSupabase()
+    .from("saves")
+    .select("*")
+    .eq("profile_id", profileId)
+    .ilike("title", title.replace(/[%_\\]/g, "\\$&"))
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data as SaveRow | null;
+}
+
+/** Gives a save its link, only when it has none, so a link they sent later isn't overwritten. */
+export async function setSaveLink(saveId: string, url: string): Promise<void> {
+  const { error } = await getSupabase().from("saves").update({ url }).eq("id", saveId).is("url", null);
+  if (error) throw error;
+}
+
 /** Drops a save and, with it, any reminders still waiting to go out. */
 export async function removeSave(profileId: string, saveId: string): Promise<boolean> {
   const { data, error } = await getSupabase()

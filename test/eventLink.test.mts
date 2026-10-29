@@ -25,6 +25,7 @@ const { eventLinksIn, extractEvent, describeWhen } = await import("../src/agent/
 const { runTool } = await import("../src/agent/tools.ts");
 const { stripUnknownLinks, stripLinks, hasLink } = await import("../src/agent/links.ts");
 const { fetchPages } = await import("../src/search/exa.ts");
+const { videoFrames } = await import("../src/utils/video.ts");
 
 const profile: any = { id: "p1", city: "NYC", name: null };
 const session = (userMessage: string, history = "") => ({
@@ -36,13 +37,14 @@ const session = (userMessage: string, history = "") => ({
   userText: `${history}\n${userMessage}`,
   userMessage,
   eventReads: new Map<string, Promise<any>>(),
+  linkRecReads: 0,
   pageText: "",
   storedText: "",
   untrusted: false,
 });
 
 const PAGE = "Rooftop Sunset Party hosted by Haps Crew. Saturday Nov 7 at 8pm. Doors 8pm. 123 Main St, Brooklyn. Tickets from $20.";
-const page = (text = PAGE) => json({ results: [{ url: "https://posh.vip/e/abc", title: "Rooftop Sunset", text }] });
+const page = (text = PAGE) => json({ results: [{ url: "https://partiful.com/e/abc", title: "Rooftop Sunset", text }] });
 const message = (fields: Record<string, unknown>) =>
   json({
     content: [{ type: "text", text: JSON.stringify({ is_event: true, ...fields }) }],
@@ -74,12 +76,12 @@ async function test(name: string, fn: () => Promise<void> | void) {
   }
 }
 
-const URL1 = "https://posh.vip/e/abc";
+const URL1 = "https://partiful.com/e/abc";
 
 await test("detects http(s) links in the message, capped at 2, deduped", () => {
   assert.deepEqual(eventLinksIn(`yo ${URL1} lol`), [URL1]);
   assert.deepEqual(eventLinksIn(`${URL1} ${URL1}/ https://dice.fm/event/x https://ra.co/events/1`), [URL1, "https://dice.fm/event/x"]);
-  assert.deepEqual(eventLinksIn("no link here, u.s. node.js lofi.fm www.posh.vip/e/1"), []);
+  assert.deepEqual(eventLinksIn("no link here, u.s. node.js lofi.fm www.partiful.com/e/1"), []);
 });
 
 await test("links only in history do not trigger a read", async () => {
@@ -204,12 +206,55 @@ await test("prompt injection in the page can't reach a reply link or a save", as
   // And a reply that carries the link has it stripped, while the user's own link survives.
   const reply = stripUnknownLinks(`saved it https://evil.example/x\nyour link ${URL1}`, s.webUrls, s.savedUrls, `${s.userText}\n${s.storedText}`);
   assert.doesNotMatch(reply, /evil/);
-  assert.match(reply, /posh\.vip\/e\/abc/);
+  assert.match(reply, /partiful\.com\/e\/abc/);
 });
 
 await test("extractEvent returns null for is_event false", async () => {
   haiku = () => message({ ...EVENT, is_event: false });
   assert.equal(await extractEvent("t", "x"), null);
+});
+
+await test("video frames go to Haiku as images before the page text", async () => {
+  haiku = () => message(EVENT);
+  const frame = { mediaType: "image/jpeg" as const, data: "ZnJhbWU=" };
+  await extractEvent("Haps on Instagram", "(no caption)", [frame, frame]);
+  const content = calls.at(-1)!.body.messages[0].content;
+  assert.deepEqual(content.map((block: any) => block.type), ["image", "image", "text"]);
+  assert.equal(content[0].source.data, "ZnJhbWU=");
+  assert.match(content[2].text, /no caption/);
+});
+
+await test("rec context fields come back cleaned: summary, category, vibe, tags", async () => {
+  haiku = () =>
+    message({
+      ...EVENT,
+      summary: `A rooftop house party with a dressed-up crowd. ${"x".repeat(900)}`,
+      category: "Rooftop Party",
+      neighborhood: "Bushwick",
+      vibe: "sweaty and joyful",
+      music: "house, disco",
+      crowd: "house heads",
+      best_for: ["dancing", "visit https://evil.example/x", 7, "late night", "a", "b", "c", "d"],
+    });
+  const event: any = await extractEvent("t", PAGE);
+  assert.match(event.summary, /^A rooftop house party/);
+  assert.ok(event.summary.length <= 600);
+  assert.equal(event.category, "rooftop party");
+  assert.equal(event.neighborhood, "Bushwick");
+  assert.equal(event.music, "house, disco");
+  assert.equal(event.best_for.length, 5);
+  assert.doesNotMatch(JSON.stringify(event.best_for), /evil/);
+  // Older replies without the new fields still parse.
+  haiku = () => message(EVENT);
+  const plain: any = await extractEvent("t", PAGE);
+  assert.equal(plain.category, null);
+  assert.deepEqual(plain.best_for, []);
+});
+
+await test("video frames only come from Instagram's CDN over https", async () => {
+  for (const url of ["https://evil.example/v.mp4", "http://scontent.cdninstagram.com/v.mp4", "file:///etc/passwd", "https://cdninstagram.com.evil.example/v.mp4"]) {
+    assert.deepEqual(await videoFrames(url, 10), [], url);
+  }
 });
 
 await test("link filter catches protocol-less and odd-scheme forms", () => {
@@ -234,8 +279,8 @@ await test("link filter catches protocol-less and odd-scheme forms", () => {
 
 await test("link filter still lets the user's own links through", () => {
   const known = `check ${URL1} and lofi.fm`;
-  const out = stripUnknownLinks(`${URL1}\nlofi.fm\nPOSH.VIP/e/ABC`, new Set(), new Set(), known);
-  assert.match(out, /posh\.vip\/e\/abc/i);
+  const out = stripUnknownLinks(`${URL1}\nlofi.fm\nPARTIFUL.COM/e/ABC`, new Set(), new Set(), known);
+  assert.match(out, /partiful\.com\/e\/abc/i);
   assert.match(out, /lofi\.fm/);
   // a search result's homepage passes, a deeper path on that host does not
   const hosted = stripUnknownLinks("https://bar.com\nhttps://bar.com/other", new Set(["https://bar.com/menu"]), new Set(), "").trim();
@@ -359,8 +404,8 @@ await test("same link is read once, and reads are capped at 2", async () => {
 });
 
 await test("the user's spelling is fetched, minus trailing punctuation", async () => {
-  await runTool(profile, "read_event_link", { url: "posh.vip/e/ABC" }, session("is this fun (https://posh.vip/e/ABC)?"));
-  assert.equal(calls[0].body.urls[0], "https://posh.vip/e/ABC");
+  await runTool(profile, "read_event_link", { url: "partiful.com/e/ABC" }, session("is this fun (https://partiful.com/e/ABC)?"));
+  assert.equal(calls[0].body.urls[0], "https://partiful.com/e/ABC");
 });
 
 await test("Haiku max_tokens / refusal stop reasons -> unreadable", async () => {
@@ -429,38 +474,6 @@ await test("generateReply: read_event_link narration is dropped, answer kept, pl
   assert.doesNotMatch(reply.text, /evil/);
   assert.match(reply.text, /sat nov 7 8pm/);
   assert.match(reply.text, /want me to save it\?/);
-});
-
-await test("posh.vip titles: title and venue come from the page title, not Haiku", async () => {
-  const cases: [string, string, string | null][] = [
-    ["The Trip Miami | Nova Social Club | Sat, Nov 7, 2026 | The Trip", "The Trip Miami", "The Trip"],
-    ["SLUTTY SUNDAY | LUXMIAMI | Sun, Oct 25, 2026 | TUCANDELA WYNWOOD", "SLUTTY SUNDAY", "TUCANDELA WYNWOOD"],
-    ["LA FACTORIA REGGAETON OLD SCHOOL at Candela  | CANDELA BAR BRICKELL | Sun, Oct 25, 2026 | CANDELA BAR BRICKELL 📍", "LA FACTORIA REGGAETON OLD SCHOOL at Candela", "CANDELA BAR BRICKELL"],
-    // No venue part: the title still comes from the page, the venue stays Haiku's.
-    ["Palm Tree Club Miami | Lifted Events LLC | Sat, Oct 24, 2026", "Palm Tree Club Miami", "Haiku Venue"],
-  ];
-  for (const [pageTitle, title, venue] of cases) {
-    exa = () => json({ results: [{ url: URL1, title: pageTitle, text: PAGE }] });
-    haiku = () => message({ ...EVENT, title: "Haiku Title", venue: "Haiku Venue" });
-    const r: any = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
-    assert.equal(r.untrusted_page_content.title, title, pageTitle);
-    assert.equal(r.untrusted_page_content.venue, venue, pageTitle);
-    // time still comes from Haiku
-    assert.equal(r.untrusted_page_content.when, "Sat Nov 7 8pm");
-  }
-  // Other hosts and unrecognized shapes are left to Haiku.
-  const other = "https://dice.fm/event/x";
-  exa = () => json({ results: [{ url: other, title: "A | B | Sat, Nov 7, 2026 | C", text: PAGE }] });
-  haiku = () => message({ ...EVENT, title: "Haiku Title", venue: "Haiku Venue" });
-  let r: any = await runTool(profile, "read_event_link", { url: other }, session(other));
-  assert.equal(r.untrusted_page_content.venue, "Haiku Venue");
-  exa = () => json({ results: [{ url: URL1, title: "Just A | Title | Here | Now", text: PAGE }] });
-  r = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
-  assert.equal(r.untrusted_page_content.venue, "Haiku Venue");
-  // A planted link in a title part is stripped like any other field.
-  exa = () => json({ results: [{ url: URL1, title: "Party https://evil.example/x | H | Sat, Nov 7, 2026 | Club //evil.com/y", text: PAGE }] });
-  r = await runTool(profile, "read_event_link", { url: URL1 }, session(URL1));
-  assert.doesNotMatch(JSON.stringify(r), /evil/);
 });
 
 await test("price_note keeps stated prices, drops commentary; age has its own field", async () => {

@@ -1,6 +1,6 @@
 // Run: npx tsx test/reminders.test.mts. Pure functions, no network.
 import assert from "node:assert/strict";
-import { localTime, reminderDeadline, reminderTimes, zoneFor } from "../src/reminders/schedule.ts";
+import { localTime, reminderDeadline, reminderTimes, sameEvent, sameEventTitle, zoneFor } from "../src/reminders/schedule.ts";
 
 const NY = "America/New_York";
 const iso = (ms: number | undefined) => (ms === undefined ? undefined : new Date(ms).toISOString());
@@ -45,6 +45,24 @@ test("a 5am start is a morning, not the night before", () => {
   const times = reminderTimes({ starts_at: "2026-11-08T05:00:00-05:00", event_date: "2026-11-08" }, NY, Date.parse("2026-10-29T12:00:00Z"));
   assert.equal(iso(times.check_in), "2026-11-08T00:00:00.000Z");
   assert.equal(times.day_of, undefined);
+});
+
+test("same event title: whole words only, filler and punctuation ignored", () => {
+  assert.equal(sameEventTitle("MOVE", "MOVE @ Tomorrowland"), true);
+  assert.equal(sameEventTitle("move at the tomorrowland", "MOVE @ Tomorrowland!"), true);
+  assert.equal(sameEventTitle("MOVE", "MOVEMENT"), false);
+  assert.equal(sameEventTitle("Halloween Rave", "Halloween Ball"), false);
+  assert.equal(sameEventTitle("x", "x at gramps"), false);
+});
+
+test("same event: different links or different venues are two events, even with matching titles", () => {
+  const ev = (title: string, venue: string | null = null, url: string | null = null) => ({ title, venue, url });
+  assert.equal(sameEvent(ev("HALLOWEEN", "Gramps"), ev("Halloween Ball", "Club Space")), false);
+  assert.equal(sameEvent(ev("Halloween", null, "https://posh.vip/e/a"), ev("Halloween", null, "https://posh.vip/e/b")), false);
+  assert.equal(sameEvent(ev("MOVE", "Tomorrowland"), ev("MOVE @ Tomorrowland", "Tomorrowland Miami")), true);
+  // The link and then the flyer: one has a url, the other a venue, and the titles match.
+  assert.equal(sameEvent(ev("MOVE", null, "https://posh.vip/e/move"), ev("MOVE @ Tomorrowland", "Tomorrowland")), true);
+  assert.equal(sameEvent(ev("Same Title"), ev("Same Title", null, "https://ra.co/events/1")), true);
 });
 
 test("days before crosses a month", () => {
