@@ -612,8 +612,8 @@ export async function runTool(
       if (!isTasteKind(input.kind) || !asString(input.label)) {
         return { error: "kind and label are required" };
       }
-      if (session.untrusted && hasLink(asString(input.label)!)) {
-        return { error: "link_in_label", hint: "Labels are short taste words, not links." };
+      if (session.untrusted && (hasLink(asString(input.label)!) || hasLink(asString(input.evidence) ?? ""))) {
+        return { error: "link_in_label", hint: "Labels and evidence are short taste words, not links." };
       }
       if (plantedByPage(asString(input.label)!, session)) {
         return { error: "not_from_user", hint: "That came from the event page. Only save tastes the user said themselves." };
@@ -751,6 +751,10 @@ export async function runTool(
       }
       if (Object.keys(patch).length === 0) {
         return { error: "nothing_to_update" };
+      }
+      // A planted link saved here would come back in every later prompt.
+      if (session.untrusted && Object.entries(patch).some(([field, value]) => field !== "email" && hasLink(value))) {
+        return { error: "link_in_profile", hint: "Profile fields are short words, not links." };
       }
       if (patch.full_name && patch.full_name.split(" ").length < 2) {
         return { error: "need_last_name", hint: "That's one name. Ask for their first and last name." };

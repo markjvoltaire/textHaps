@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { startObservation } from "@langfuse/tracing";
-import { isOnboarded, missingOnboarding, unknownTopics } from "../db/profiles.ts";
+import { isOnboarded, missingOnboarding, PROFILE_FIELDS, unknownTopics } from "../db/profiles.ts";
 import type { Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import type { ShownRec } from "../db/picks.ts";
@@ -277,10 +277,14 @@ export async function generateReply(input: {
         : input.userMessage,
     },
   ];
-  // Taste labels and saves are stored text that went into the prompt, so a link planted in
-  // one earlier can come back in this reply even with no lookup. Filter whenever a full
-  // link is there; a bare "lofi.fm" label is the user's own and is allowed through instead.
-  const stored = [...input.taste.map((signal) => signal.label), ...input.saves.map(formatSave)].join("\n");
+  // Tastes (label and evidence), profile fields, and saves are stored text that went into the prompt,
+  // so a link planted in one earlier can come back in this reply even with no lookup. Filter whenever
+  // a full link is there; a bare "lofi.fm" label is the user's own and is allowed through instead.
+  const stored = [
+    ...input.taste.flatMap((signal) => [signal.label, signal.evidence ?? ""]),
+    ...PROFILE_FIELDS.map((field) => input.profile[field] ?? ""),
+    ...input.saves.map(formatSave),
+  ].join("\n");
   const session: ToolSession = {
     webSearches: 0,
     webUrls: new Set(),
