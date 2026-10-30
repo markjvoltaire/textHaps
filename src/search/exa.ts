@@ -93,6 +93,50 @@ async function exaSearch(options: {
   }));
 }
 
+export type PageImages = {
+  url: string;
+  /** The page's share image (og:image), then other images on it. */
+  images: string[];
+};
+
+/** Pages about the query with the images on each, for finding a rec's picture. Offline, so no rush. */
+export async function searchPageImages(query: string, includeDomains?: string[]): Promise<PageImages[]> {
+  const token = process.env.EXA_API_KEY;
+  if (!token) throw new Error("EXA_API_KEY missing");
+
+  const request = () =>
+    fetch(EXA_URL, {
+      method: "POST",
+      headers: {
+        "x-api-key": token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        numResults: 6,
+        userLocation: "US",
+        ...(includeDomains ? { includeDomains } : {}),
+        contents: { extras: { imageLinks: 4 } },
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+  let response = await request();
+  // A backfill runs several recs at once and can go over Exa's 10 requests a second.
+  for (let attempt = 1; response.status === 429 && attempt <= 3; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+    response = await request();
+  }
+  if (!response.ok) {
+    throw new Error(`exa ${response.status}: ${await response.text()}`);
+  }
+
+  const payload = (await response.json()) as { results?: { url: string; image?: string; extras?: { imageLinks?: string[] } }[] };
+  return (payload.results ?? []).map((result) => ({
+    url: result.url,
+    images: [result.image, ...(result.extras?.imageLinks ?? [])].filter((image): image is string => !!image && /^https?:\/\//.test(image)),
+  }));
+}
+
 export type PageContent = {
   url: string;
   title: string;

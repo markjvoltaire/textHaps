@@ -29,7 +29,7 @@ type MonidRun = {
   runId: string;
   status: string;
   providerResponse?: { httpStatus?: number; error?: unknown };
-  output?: { data?: unknown } | null;
+  output?: unknown;
 };
 
 type RawVideo = {
@@ -261,11 +261,21 @@ export async function tiktokComments(url: string, deadlineMs = 8000): Promise<Ti
 
 /** Run an AnyAPI endpoint through Monid and return its data, polling if the run goes async. */
 async function runMonid<T>(endpoint: string, body: Record<string, unknown>, deadlineMs: number): Promise<T | undefined> {
+  return ((await runProvider("anyapi", endpoint, { body }, deadlineMs)) as { data?: T } | null | undefined)?.data;
+}
+
+/** One run on any Monid provider (SerpApi's Google Maps, say), returning its raw output. */
+export async function runProvider(
+  provider: string,
+  endpoint: string,
+  input: { body?: Record<string, unknown>; queryParams?: Record<string, unknown> },
+  deadlineMs: number,
+): Promise<unknown> {
   const token = process.env.MONID_API_KEY;
   if (!token) throw new Error("MONID_API_KEY missing");
 
   const deadline = Date.now() + deadlineMs;
-  let run = await monid<MonidRun>(token, "/run", deadline, { provider: "anyapi", endpoint, input: { body } });
+  let run = await monid<MonidRun>(token, "/run", deadline, { provider, endpoint, input });
   // Async providers answer 202 and finish in the background, so poll until done or out of time.
   while (run.status === "READY" || run.status === "RUNNING") {
     await new Promise((resolve) => setTimeout(resolve, 700));
@@ -275,7 +285,7 @@ async function runMonid<T>(endpoint: string, body: Record<string, unknown>, dead
   if (run.status !== "COMPLETED" || httpStatus < 200 || httpStatus >= 300) {
     throw new Error(`monid ${endpoint} ${run.status} ${httpStatus}`);
   }
-  return run.output?.data as T | undefined;
+  return run.output;
 }
 
 async function monid<T>(token: string, path: string, deadline: number, body?: unknown): Promise<T> {

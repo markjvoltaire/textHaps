@@ -5,6 +5,8 @@ export type ShownRec = {
   id: string;
   name: string;
   url: string | null;
+  /** Its photo in the recs table, for the carousel. */
+  image?: string | null;
   /** Looks up and saves the rec's own site when it has none. Started early, so it's usually done by send time. */
   site?: () => Promise<string | null>;
 };
@@ -62,4 +64,25 @@ export async function recordPick(input: { profileId: string; name: string; outco
     .insert({ profile_id: input.profileId, name: input.name.trim(), rec_key: key, ...outcome });
   if (insertError) throw insertError;
   return { name: input.name.trim(), matched: false };
+}
+
+/** Remembers which rec each carousel photo was, by the message id it went out with. */
+export async function recordCards(profileId: string, cards: { messageId: string; rec: ShownRec }[]): Promise<void> {
+  if (cards.length === 0) return;
+  const { error } = await getSupabase()
+    .from("rec_cards")
+    .upsert(cards.map(({ messageId, rec }) => ({ message_id: messageId, profile_id: profileId, rec_id: rec.id, name: rec.name })));
+  if (error) throw error;
+}
+
+/** The rec a carousel photo showed, when they reply to that photo. Only their own cards count. */
+export async function cardRec(profileId: string, messageId: string): Promise<string | null> {
+  const { data, error } = await getSupabase()
+    .from("rec_cards")
+    .select("name")
+    .eq("message_id", messageId)
+    .eq("profile_id", profileId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as { name: string } | null)?.name ?? null;
 }

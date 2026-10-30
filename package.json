@@ -13,6 +13,7 @@
     "signals": "tsx src/signals/run.ts",
     "vectors": "tsx src/search/vectors.ts",
     "recs": "tsx src/recs/draft.ts",
+    "rec-images": "tsx src/recs/images.ts",
     "warm-model": "tsx src/search/warmModel.ts"
   },
   "dependencies": {

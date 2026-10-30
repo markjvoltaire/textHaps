@@ -1,8 +1,8 @@
 import { propagateAttributes, startActiveObservation } from "@langfuse/tracing";
-import { attachment, richlink, type Message, type Space } from "spectrum-ts";
+import { attachment, group, richlink, type Message, type Space } from "spectrum-ts";
 import { background } from "spectrum-ts/providers/imessage";
 import { generateReply, LINKS_NOTE } from "../agent/claude.ts";
-import { recordShown, recsNamedIn, type ShownRec } from "../db/picks.ts";
+import { cardRec, recordCards, recordShown, recsNamedIn, type ShownRec } from "../db/picks.ts";
 import { listSaves } from "../db/saves.ts";
 import { claimMessage } from "../db/handled.ts";
 import { markBackgroundCleared, upsertProfile } from "../db/profiles.ts";
@@ -44,6 +44,11 @@ const BARE_URL = /^https?:\/\/\S+$/i;
 const RICHLINK_TIMEOUT_MS = 6_000;
 /** How long the texts wait on a rec's site lookup (Exa + Jev, ~1s, usually started during the reply). A late one just goes out without a card. */
 const REC_SITE_WAIT_MS = 2_500;
+/** Recs with photos it takes to send them as a swipeable stack instead of one card each. */
+const CAROUSEL_MIN = 2;
+const CAROUSEL_MAX = 5;
+// Photon uploads each photo before confirming, so the stack gets longer than a card.
+const CAROUSEL_TIMEOUT_MS = 20_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -67,9 +72,25 @@ function audioOf(content: Message["content"]): Audio | undefined {
   return undefined;
 }
 
-/** The pieces of a message: a group (a photo sent with text, a link with a note) is several, anything else is one. */
+/** The pieces of a message: a group (a photo sent with text, a link with a note) is several, anything else is one. A reply is what they wrote in it. */
 function partsOf(content: Message["content"]): Message["content"][] {
+  if (content.type === "reply") return partsOf(content.content);
   return content.type === "group" ? content.items.map((item) => item.content) : [content];
+}
+
+/**
+ * The rec a swipe-reply points at, put in front of their text, when it's one of the carousel photos.
+ * Not the text of other messages: quoting Haps's own words into theirs would let page text pass as
+ * something they said.
+ */
+async function replyContext(message: Message, profileId: string): Promise<string> {
+  if (message.content.type !== "reply") return "";
+  const target = message.content.target;
+  const rec = await cardRec(profileId, target.id).catch((err: unknown) => {
+    console.warn(`[reply] card lookup failed id=${target.id}:`, formatError(err));
+    return null;
+  });
+  return rec ? `(replying to the photo of ${rec}) ` : "";
 }
 
 /** What they wrote, from every text piece and link preview in the message. */
@@ -84,6 +105,28 @@ function textOf(parts: Message["content"][]): string {
 function photoOf(content: Message["content"]): Audio | undefined {
   if (content.type === "attachment" && content.mimeType.startsWith("image/")) return content;
   return undefined;
+}
+
+/**
+ * The recs' photos as one swipeable stack, each named so a reply to it can be traced back to the
+ * rec. A failed or slow send is logged and skipped: the texts still name every rec.
+ */
+async function sendCarousel(space: Space, profileId: string, recs: ShownRec[], senderId: string): Promise<void> {
+  const photos = recs.map((rec) => attachment(new URL(rec.image!), { name: `${rec.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.jpg`, mimeType: "image/jpeg" }));
+  try {
+    const sent = await withTimeout(
+      traced("carousel", () => space.send(group(photos[0]!, photos[1]!, ...photos.slice(2)))),
+      CAROUSEL_TIMEOUT_MS,
+      "carousel",
+    );
+    const items = sent?.content.type === "group" ? sent.content.items : [];
+    // Photon returns the photos in the order they were sent.
+    const cards = items.flatMap((item, i) => (recs[i] ? [{ messageId: item.id, rec: recs[i]! }] : []));
+    if (cards.length !== recs.length) console.warn(`[carousel] ${cards.length} of ${recs.length} photo ids came back for sender=${senderId}`);
+    await recordCards(profileId, cards);
+  } catch (err) {
+    console.warn(`[carousel] send failed for sender=${senderId}:`, formatError(err));
+  }
 }
 
 /** Clears the Haps chat background from threads that got one earlier. A failure never blocks the reply. */
@@ -190,6 +233,8 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     text = text || PHOTO_TURN;
   }
 
+  text = (await replyContext(message, profile.id)) + text;
+
   console.log(`[in] space=${space.id} sender=${senderId} text=${JSON.stringify(text)}${image ? ` photo=${photo!.mimeType}` : ""}`);
 
   // One Langfuse trace per reply: the text in, what was actually sent out, and the
@@ -266,13 +311,18 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         "rec sites",
       ).catch((err: unknown) => console.warn(`[reclink] gave up waiting for sender=${senderId}:`, formatError(err)));
     }
+    // Several recs with photos go out first as one swipeable stack, in the order the reply names
+    // them, and then the texts. Their sites stay unsent, for a follow-up to ask for.
+    const named = [...new Set(bubbles.flatMap((bubble) => recsNamedIn(bubble, recsOffered)))];
+    const pictured = named.filter((rec) => rec.image).slice(0, CAROUSEL_MAX);
+    const carousel = platform === "imessage" && pictured.length >= CAROUSEL_MIN ? pictured : [];
     // What goes out, in order. One place: its card first. Several recs: each rec's card right
     // before the text about it, so every pick that has a page gets one.
     const plan: { card?: string; text?: string }[] = [];
-    if (link) plan.push({ card: link });
-    const carded = new Set(link ? [link] : []);
+    if (link && !carousel.length) plan.push({ card: link });
+    const carded = new Set(link && !carousel.length ? [link] : []);
     for (const bubble of bubbles) {
-      for (const rec of recsNamedIn(bubble, recsOffered)) {
+      for (const rec of carousel.length ? [] : recsNamedIn(bubble, recsOffered)) {
         if (rec.url && !carded.has(rec.url)) {
           carded.add(rec.url);
           plan.push({ card: rec.url });
@@ -280,10 +330,12 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
       }
       plan.push({ text: bubble });
     }
-    const sent = plan.map((item) => item.card ?? item.text).join("\n");
-    span.update({ output: sent, metadata: { platform, richlinks: carded.size } });
-    // Event pages the reply named but didn't send, so a follow-up ("send the link") can still send the link.
-    const unsent = eventLinks.filter((item) => !carded.has(item.url));
+    const photos = carousel.length ? `(photos: ${carousel.map((rec) => rec.name).join(" · ")})\n` : "";
+    const sent = photos + plan.map((item) => item.card ?? item.text).join("\n");
+    span.update({ output: sent, metadata: { platform, richlinks: carded.size, photos: carousel.length } });
+    // Pages the reply named but didn't send, so a follow-up ("send the link") can still send the link.
+    const recPages = carousel.flatMap((rec) => (rec.url ? [{ title: rec.name, url: rec.url }] : []));
+    const unsent = [...eventLinks, ...recPages].filter((item) => !carded.has(item.url));
     const remembered = unsent.length
       ? `${sent}\n${LINKS_NOTE} ${unsent.map((item) => `${item.title} ${item.url}`).join(" · ")})`
       : sent;
@@ -299,6 +351,7 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // No pauses between sends: each already takes a couple of seconds to confirm. Photon builds a
     // card's preview before confirming, which once took 30s and then failed, so each card is
     // capped to keep it from holding up the texts; it's not retried, since it may still land.
+    if (carousel.length) await sendCarousel(space, profile.id, carousel, senderId);
     let firstText = true;
     for (const item of plan) {
       if (item.card) {

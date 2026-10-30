@@ -475,7 +475,7 @@ function keepRecLinks(recs: RecResult[], session: ToolSession): void {
   recs.forEach((rec, i) => {
     let lookup: Promise<string | null> | undefined;
     const site = () => (lookup ??= ensureRecSite(rec));
-    session.recsOffered.set(rec.id, { id: rec.id, name: rec.name, url: rec.url, site });
+    session.recsOffered.set(rec.id, { id: rec.id, name: rec.name, url: rec.url, image: rec.image_url, site });
     if (!rec.url && i < PREFETCH_SITES) void site();
   });
   for (const rec of recs) {

@@ -15,7 +15,7 @@ export const RECS_METROS = new Set(CURATED_RECS_ON ? ["miami", "la"] : []);
 export type RecResult = Pick<
   RecRow,
   "id" | "metro" | "name" | "category" | "neighborhood" | "address" | "url" | "why" | "best_for" | "vibe" | "music" | "crowd" | "price" | "schedule"
-> & { url_checked_at: string | null };
+> & { url_checked_at: string | null; image_url: string | null };
 
 /** The approved recs closest in meaning to the ask, nearest first, nudged toward their taste when there is one. */
 export async function searchRecs(
@@ -29,6 +29,6 @@ export async function searchRecs(
     const row = rows.get(match.id);
     if (!row) return [];
     const { id, metro, name, category, neighborhood, address, url, url_checked_at, why, best_for, vibe, music, crowd, price, schedule } = row;
-    return [{ id, metro, name, category, neighborhood, address, url, url_checked_at, why, best_for, vibe, music, crowd, price, schedule }];
+    return [{ id, metro, name, category, neighborhood, address, url, url_checked_at, image_url: row.image_url ?? null, why, best_for, vibe, music, crowd, price, schedule }];
   });
 }
