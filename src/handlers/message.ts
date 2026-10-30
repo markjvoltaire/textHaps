@@ -10,6 +10,7 @@ import type { Profile } from "../db/types.ts";
 import { flushTracing } from "../observability.ts";
 import { listTaste } from "../db/taste.ts";
 import { appendExchange, getHistory } from "../memory/history.ts";
+import { embedExchange, recallExchanges } from "../memory/recall.ts";
 import { checkRateLimit, noteVoiceFailure, shouldWarn, voiceAllowed } from "./rateLimit.ts";
 import { prepareImage, type ImageInput } from "../utils/image.ts";
 import { cleanLinks, stripLinks } from "../agent/links.ts";
@@ -256,13 +257,19 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     // Runs while Claude works, so it doesn't hold up the reply.
     const backgroundCleared = clearBackground(space, profile);
     try {
-      const [taste, saves, history] = await Promise.all([
+      const [taste, saves, history, recalled] = await Promise.all([
         listTaste(profile.id),
         listSaves(profile.id),
         getHistory(profile.id),
+        // Long memory is a bonus, so a failed lookup just goes without.
+        recallExchanges(profile.id, text).catch((err: unknown) => {
+          console.warn(`[recall] failed for sender=${senderId}:`, formatError(err));
+          return [];
+        }),
       ]);
+      if (recalled.length) console.log(`[recall] sender=${senderId} brought back ${recalled.length} older exchanges`);
       const generated = await propagateAttributes({ userId: profile.id, sessionId: profile.id }, () =>
-        generateReply({ profile, taste, saves, history, userMessage: text, images: image ? [image] : undefined, spaceId: space.id, onWebSearch }),
+        generateReply({ profile, taste, saves, history, recalled, userMessage: text, images: image ? [image] : undefined, spaceId: space.id, onWebSearch }),
       );
       // Typing must start before the answer lands, or the dots can linger after it.
       await searchingNotice;
@@ -344,9 +351,16 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
     recordShown(profile.id, recsNamedIn(sent, recsOffered)).catch((err: unknown) =>
       console.error(`[picks] logging shown recs failed for sender=${senderId}:`, formatError(err)),
     );
-    await appendExchange(profile.id, senderId, image?.ocr ? withPhotoText(text, image.ocr) : text, remembered).catch((err: unknown) => {
+    const userTurn = await appendExchange(profile.id, senderId, image?.ocr ? withPhotoText(text, image.ocr) : text, remembered).catch((err: unknown) => {
       console.error(`[history] save failed for sender=${senderId}:`, formatError(err));
+      return null;
     });
+    // Not awaited: embedding takes a moment, and the texts shouldn't wait on it. A miss is filled by the backfill.
+    if (userTurn) {
+      embedExchange(userTurn, text, remembered).catch((err: unknown) =>
+        console.warn(`[recall] embedding failed for sender=${senderId}:`, formatError(err)),
+      );
+    }
 
     console.log(`[out] space=${space.id} sender=${senderId} reply=${JSON.stringify(reply)}`);
     // No pauses between sends: each already takes a couple of seconds to confirm. Photon builds a

@@ -4,6 +4,7 @@ import { isOnboarded, missingOnboarding, PROFILE_FIELDS, unknownTopics } from ".
 import type { Profile, SaveRow, TasteSignal } from "../db/types.ts";
 import type { ChatTurn } from "../memory/history.ts";
 import { photoTextIn, saidTextOf, withoutPhotoText } from "../memory/photoText.ts";
+import type { Recalled } from "../memory/recall.ts";
 import type { ShownRec } from "../db/picks.ts";
 import { formatSave } from "../db/saves.ts";
 import type { ImageInput } from "../utils/image.ts";
@@ -97,7 +98,17 @@ function tasteLine(signal: TasteSignal): string {
  * (profile, tastes, saves, what's still unknown, today's date), which changes as they talk, so it
  * goes after the cached part instead of breaking it.
  */
-function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[]): { stable: string; current: string } {
+/** Older exchanges recalled for this message, with their dates, or nothing when none came back. */
+function recalledLines(recalled: Recalled[]): string {
+  if (recalled.length === 0) return "";
+  const lines = recalled.map((turn) => {
+    const day = new Date(turn.at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    return `- ${day}. them: ${turn.content}${turn.reply ? ` / you: ${turn.reply}` : ""}`;
+  });
+  return `\n\nEarlier in your chats (older messages that seem related to this one, oldest first). Use them to remember what they told you or what you sent; only bring one up when it helps:\n${lines.join("\n")}`;
+}
+
+function buildSystemPrompt(profile: Profile, taste: TasteSignal[], saves: SaveRow[], recalled: Recalled[] = []): { stable: string; current: string } {
   const tasteLines = taste.length === 0 ? "None yet." : taste.map(tasteLine).join("\n");
   const saveLines =
     saves.length === 0 ? "None yet." : saves.map((save) => `- ${formatSave(save)}`).join("\n");
@@ -232,7 +243,7 @@ ${tasteLines}
 Saved:
 ${saveLines}
 
-Still unknown: ${unknown.length ? unknown.join("; ") : "nothing, just keep it fresh"}.`;
+Still unknown: ${unknown.length ? unknown.join("; ") : "nothing, just keep it fresh"}.${recalledLines(recalled)}`;
 
   return { stable, current };
 }
@@ -254,6 +265,8 @@ export async function generateReply(input: {
   taste: TasteSignal[];
   saves: SaveRow[];
   history: ChatTurn[];
+  /** Older exchanges, past the history, that seem related to this message. */
+  recalled?: Recalled[];
   userMessage: string;
   /** Photos sent with this message (a flyer screenshot), shown to Claude on this turn only. */
   images?: ImageInput[];
@@ -326,7 +339,7 @@ export async function generateReply(input: {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     // Out of tool rounds: make the last one answer with what it has.
     const lastRound = round === MAX_TOOL_ROUNDS - 1;
-    const prompt = buildSystemPrompt(input.profile, input.taste, input.saves);
+    const prompt = buildSystemPrompt(input.profile, input.taste, input.saves, input.recalled);
     // The cache marker sits after the stable part, so tools + rules (~4k tokens) are read from
     // cache on every call for every user. Without it the only marker was at the end of the
     // conversation, and since the replayed history shifts each message, that missed every time.

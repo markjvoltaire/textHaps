@@ -6,7 +6,7 @@ export type ChatTurn = {
 };
 
 /** Conversation memory lives in Supabase, so deploys and restarts keep every thread. */
-const MAX_TURNS = 20;
+export const MAX_TURNS = 20;
 
 export async function getHistory(profileId: string): Promise<ChatTurn[]> {
   const { data, error } = await getSupabase()
@@ -23,22 +23,24 @@ export async function getHistory(profileId: string): Promise<ChatTurn[]> {
   return turns;
 }
 
-/** Writes both sides of an exchange together, user turn first, so history never ends mid-pair. */
+/** Writes both sides of an exchange together, user turn first, so history never ends mid-pair. Returns the user turn's id. */
 export async function appendExchange(
   profileId: string,
   handle: string,
   user: string,
   assistant: string,
-): Promise<void> {
+): Promise<string> {
   const now = Date.now();
-  const { error } = await getSupabase()
+  const { data, error } = await getSupabase()
     .from("chat_turns")
     .insert([
       { profile_id: profileId, handle, role: "user", content: user, created_at: new Date(now).toISOString() },
       { profile_id: profileId, handle, role: "assistant", content: assistant, created_at: new Date(now + 1).toISOString() },
-    ]);
+    ])
+    .select("id, role");
 
   if (error) throw error;
+  return ((data ?? []) as { id: string; role: string }[]).find((row) => row.role === "user")!.id;
 }
 
 /** A text Haps sent first (a reminder), with no user turn before it. */
