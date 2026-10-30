@@ -46,7 +46,7 @@ const RICHLINK_TIMEOUT_MS = 6_000;
 const REC_SITE_WAIT_MS = 2_500;
 /** Recs with photos it takes to send them as a swipeable stack instead of one card each. */
 const CAROUSEL_MIN = 2;
-const CAROUSEL_MAX = 5;
+const CAROUSEL_MAX = 6;
 // Photon uploads each photo before confirming, so the stack gets longer than a card.
 const CAROUSEL_TIMEOUT_MS = 20_000;
 
@@ -311,11 +311,12 @@ export async function handleMessage(space: Space, message: Message): Promise<voi
         "rec sites",
       ).catch((err: unknown) => console.warn(`[reclink] gave up waiting for sender=${senderId}:`, formatError(err)));
     }
-    // Several recs with photos go out first as one swipeable stack, in the order the reply names
-    // them, and then the texts. Their sites stay unsent, for a follow-up to ask for.
+    // Several recs with photos go out first as one swipeable stack, then the texts: the ones the
+    // reply names, in its order, topped up with the search's next closest matches so there's a
+    // full stack to swipe. Their sites stay unsent, for a follow-up to ask for.
     const named = [...new Set(bubbles.flatMap((bubble) => recsNamedIn(bubble, recsOffered)))];
-    const pictured = named.filter((rec) => rec.image).slice(0, CAROUSEL_MAX);
-    const carousel = platform === "imessage" && pictured.length >= CAROUSEL_MIN ? pictured : [];
+    const pictured = [...new Set([...named, ...recsOffered])].filter((rec) => rec.image).slice(0, CAROUSEL_MAX);
+    const carousel = platform === "imessage" && named.some((rec) => rec.image) && pictured.length >= CAROUSEL_MIN ? pictured : [];
     // What goes out, in order. One place: its card first. Several recs: each rec's card right
     // before the text about it, so every pick that has a page gets one.
     const plan: { card?: string; text?: string }[] = [];

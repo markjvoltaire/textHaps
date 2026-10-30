@@ -546,7 +546,7 @@ export async function runTool(
           source: "curated",
           count: recs.length,
           haps_recs: forClaude(recs),
-          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If none is near where they are or in their budget, call find_places again with live: true instead of sending one that's far. If your answer is about one place that has a url, end with that url alone on the last line.",
+          hint: "These are Haps's own vetted recs, closest match first. Recommend only the ones that fit what they asked, and only with the details listed here. If none is near where they are or in their budget, call find_places again with live: true instead of sending one that's far. If your answer is about one place that has a url, end with that url alone on the last line. When you recommend two or more, photos of up to 6 of these go out above your texts, the ones you name first and then the next closest, so name your top picks and don't list the rest.",
         };
       }
       session.untrusted = true;
